@@ -1,4 +1,5 @@
 import { Input } from "./components/input.ts";
+import { getKeybindings } from "./keybindings.ts";
 import type { Component, Focusable } from "./tui.ts";
 import { getGraphemeSegmenter, stripTerminalSequences, truncateToWidth, visibleWidth } from "./utils.ts";
 
@@ -103,10 +104,18 @@ export function getAltScreenSearchMatchKey(match: AltScreenSearchMatch): string 
 }
 
 export class AltScreenSearchComponent implements Component, Focusable {
-	private readonly input = new Input();
+	private readonly input = new Input({
+		prompt: " ",
+		placeholder: "find in transcript",
+		placeholderStyle: (text) => `\x1b[2m${text}\x1b[22m`,
+	});
 	private readonly onQueryChange: (query: string) => void;
 	private resultCount = 0;
 	private resultIndex = -1;
+	private previousButtonStart = -1;
+	private previousButtonEnd = -1;
+	private nextButtonStart = -1;
+	private nextButtonEnd = -1;
 	private _focused = false;
 
 	constructor(onQueryChange: (query: string) => void) {
@@ -127,6 +136,13 @@ export class AltScreenSearchComponent implements Component, Focusable {
 		this.resultCount = count;
 	}
 
+	getNavigationDirectionAt(row: number, column: number): -1 | 1 | undefined {
+		if (row !== 2) return undefined;
+		if (column >= this.previousButtonStart && column < this.previousButtonEnd) return -1;
+		if (column >= this.nextButtonStart && column < this.nextButtonEnd) return 1;
+		return undefined;
+	}
+
 	handleInput(data: string): void {
 		const previous = this.input.getValue();
 		this.input.handleInput(data);
@@ -140,18 +156,58 @@ export class AltScreenSearchComponent implements Component, Focusable {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const label = " Find transcript";
+		const innerWidth = Math.max(0, safeWidth - 2);
+		const formatKey = (key: string | undefined): string =>
+			key
+				? key
+						.split("+")
+						.map((part) => {
+							if (process.platform === "darwin" && part.toLowerCase() === "alt") return "Option";
+							return part.charAt(0).toUpperCase() + part.slice(1);
+						})
+						.join("+")
+				: "Unbound";
+		const keybindings = getKeybindings();
+		const previousKey = formatKey(keybindings.getKeys("tui.altScreen.searchPrevious")[0]);
+		const nextKey = formatKey(keybindings.getKeys("tui.altScreen.searchNext")[0]);
 		const query = this.input.getValue();
-		const status = !query
+		const result = !query
 			? ""
 			: this.resultCount === 0
-				? "No matches "
-				: `${this.resultIndex + 1}/${this.resultCount} `;
-		const labelWidth = visibleWidth(label);
-		const statusWidth = visibleWidth(status);
-		const gap = " ".repeat(Math.max(1, safeWidth - labelWidth - statusWidth));
-		const title = truncateToWidth(`${label}${gap}${status}`, safeWidth, "");
-		const padding = " ".repeat(Math.max(0, safeWidth - visibleWidth(title)));
-		return [`\x1b[7m${title}${padding}\x1b[27m`, ...this.input.render(safeWidth)];
+				? "No matches"
+				: `${this.resultIndex + 1}/${this.resultCount}`;
+		const resultSpace = Math.max(0, innerWidth - 3);
+		const visibleResult = truncateToWidth(result, resultSpace, "");
+		const resultText = visibleResult ? `\x1b[2m ${visibleResult} \x1b[22m` : "";
+		const inputWidth = Math.max(0, innerWidth - visibleWidth(resultText));
+		const inputLine = truncateToWidth(this.input.render(Math.max(1, inputWidth))[0] ?? "", inputWidth, "");
+		const inputPadding = " ".repeat(Math.max(0, inputWidth - visibleWidth(inputLine)));
+		const content = `${inputLine}${inputPadding}${resultText}`;
+
+		let previousHint = `↑ ${previousKey}`;
+		let nextHint = `↓ ${nextKey}`;
+		let hintSeparator = " · ";
+		const availableHintWidth = Math.max(0, innerWidth - 3);
+		if (visibleWidth(previousHint) + visibleWidth(hintSeparator) + visibleWidth(nextHint) > availableHintWidth) {
+			previousHint = "↑";
+			nextHint = "↓";
+			hintSeparator = " ";
+		}
+		const hint = truncateToWidth(`${previousHint}${hintSeparator}${nextHint}`, availableHintWidth, "");
+		const framedHint = hint ? ` ${hint} ` : "";
+		const rightRuleWidth = framedHint && innerWidth > visibleWidth(framedHint) ? 1 : 0;
+		const leftRuleWidth = Math.max(0, innerWidth - visibleWidth(framedHint) - rightRuleWidth);
+		const previousStart = 2 + leftRuleWidth;
+		this.previousButtonStart = hint ? previousStart : -1;
+		this.previousButtonEnd = hint ? previousStart + visibleWidth(previousHint) : -1;
+		this.nextButtonStart = hint ? this.previousButtonEnd + visibleWidth(hintSeparator) : -1;
+		this.nextButtonEnd = hint ? this.nextButtonStart + visibleWidth(nextHint) : -1;
+
+		if (safeWidth === 1) return ["┌", "│", "└"];
+		return [
+			`┌${"─".repeat(innerWidth)}┐`,
+			`│${content}│`,
+			`└${"─".repeat(leftRuleWidth)}${framedHint}${"─".repeat(rightRuleWidth)}┘`,
+		];
 	}
 }
