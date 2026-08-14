@@ -260,6 +260,31 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	it("reveals an auto scrollbar when the pointer enters its hidden track", async () => {
+		const terminal = new RecordingTerminal(10, 5);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "auto", scrollbarHideDelayMs: 20 },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+
+		terminal.sendInput("\x1b[<35;10;3M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, true);
+		assert.strictEqual(scrollView.isScrollbarActive, true);
+		assert.ok(terminal.getViewport().some((line) => /[│█]/.test(line)));
+
+		terminal.sendInput("\x1b[<35;9;3M");
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.isScrollbarVisible, false);
+		tui.stop();
+	});
+
 	it("drags a visible scrollbar thumb and keeps it visible until release", async () => {
 		const terminal = new RecordingTerminal(10, 5);
 		const tui = new TuiAltScreen(terminal);
@@ -276,22 +301,35 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
-		terminal.sendInput("\x1b[<65;10;1M");
+		terminal.sendInput("\x1b[<65;9;1M");
 		await terminal.waitForRender();
 		assert.strictEqual(scrollView.scrollTop, 1);
+		assert.strictEqual(scrollView.isScrollbarVisible, true);
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd().at(-1)),
+			["┃", "┃", "│", "│", "│"],
+		);
+
+		const hoverEventCount = terminal.events.length;
+		terminal.sendInput("\x1b[<35;10;4M");
+		await terminal.waitForRender();
+		assert.ok(
+			terminal.events
+				.slice(hoverEventCount)
+				.some((event) => event.type === "write" && event.data.includes("\x1b[37m█\x1b[39m")),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 70));
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
 
 		terminal.sendInput("\x1b[<0;10;1M");
 		await terminal.waitForRender();
-		await new Promise((resolve) => setTimeout(resolve, 70));
-		assert.strictEqual(scrollView.isScrollbarVisible, true);
 
 		terminal.sendInput("\x1b[<32;10;4M");
 		await terminal.waitForRender();
 		assert.strictEqual(scrollView.scrollTop, 15);
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 16", "line 17", "line 18", "line 19", "line 20"],
+			["line 16  │", "line 17  │", "line 18  │", "line 19  █", "line 20  █"],
 		);
 
 		terminal.sendInput("\x1b[<0;10;4m");
@@ -312,6 +350,32 @@ describe("TuiAltScreen", () => {
 		await new Promise((resolve) => setTimeout(resolve, 70));
 		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
+		assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")));
+		tui.stop();
+	});
+
+	it("jumps to a scrollbar track position and continues dragging from there", async () => {
+		const terminal = new RecordingTerminal(10, 10);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 0);
+
+		terminal.sendInput("\x1b[<0;10;6M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 20);
+
+		terminal.sendInput("\x1b[<32;10;10M");
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 40);
+
+		terminal.sendInput("\x1b[<0;10;10m");
+		await terminal.waitForRender();
 		assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")));
 		tui.stop();
 	});
