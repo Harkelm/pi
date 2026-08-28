@@ -314,9 +314,10 @@ describe("InteractiveMode copy confirmation", () => {
 
 type ClearStatusContext = {
 	activeStatusIndicator: { kind: "working" | "retry"; dispose: () => void } | undefined;
+	activeWorkingIndicatorEmbedded: boolean;
 	statusContainer: Container;
 	defaultEditor: { setWorkingStatusIndicator: (indicator: undefined) => void };
-	editor: { setWorkingStatusIndicator: (indicator: undefined) => void };
+	editor: { setWorkingStatusIndicator?: (indicator: undefined) => void };
 	options: { tuiMode?: TuiMode };
 	ui: { getClearOnShrink: () => boolean };
 	idleStatus: Component;
@@ -337,6 +338,7 @@ describe("clear-on-shrink status spacing", () => {
 			const editor = { setWorkingStatusIndicator: vi.fn() };
 			const context: ClearStatusContext = {
 				activeStatusIndicator: { kind: "working", dispose },
+				activeWorkingIndicatorEmbedded: true,
 				statusContainer: new Container(),
 				defaultEditor: editor,
 				editor,
@@ -353,6 +355,31 @@ describe("clear-on-shrink status spacing", () => {
 		}
 	});
 
+	it("reserves standalone working status height when a custom editor cannot embed it", () => {
+		for (const [tuiMode, expectedChildren] of [
+			["regular", 1],
+			["fullscreen", 0],
+		] as const) {
+			const defaultEditor = { setWorkingStatusIndicator: vi.fn() };
+			const context: ClearStatusContext = {
+				activeStatusIndicator: { kind: "working", dispose: vi.fn() },
+				activeWorkingIndicatorEmbedded: false,
+				statusContainer: new Container(),
+				defaultEditor,
+				editor: {},
+				options: { tuiMode },
+				ui: { getClearOnShrink: () => true },
+				idleStatus: new Text("", 0, 0),
+				setEditorWorkingStatusIndicator: interactiveModePrototype.setEditorWorkingStatusIndicator,
+			};
+
+			interactiveModePrototype.clearStatusIndicator.call(context);
+
+			expect(context.statusContainer.children).toHaveLength(expectedChildren);
+			expect(context.activeWorkingIndicatorEmbedded).toBe(false);
+		}
+	});
+
 	it("reserves standalone status height only on the main-screen renderer", () => {
 		for (const [tuiMode, expectedChildren] of [
 			["regular", 1],
@@ -361,6 +388,7 @@ describe("clear-on-shrink status spacing", () => {
 			const editor = { setWorkingStatusIndicator: vi.fn() };
 			const context: ClearStatusContext = {
 				activeStatusIndicator: { kind: "retry", dispose: vi.fn() },
+				activeWorkingIndicatorEmbedded: false,
 				statusContainer: new Container(),
 				defaultEditor: editor,
 				editor,

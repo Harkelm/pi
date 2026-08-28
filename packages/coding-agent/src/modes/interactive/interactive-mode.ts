@@ -459,6 +459,7 @@ export class InteractiveMode {
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
+	private activeWorkingIndicatorEmbedded = false;
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
@@ -2158,9 +2159,11 @@ export class InteractiveMode {
 	private showStatusIndicator(indicator: StatusIndicator): void {
 		this.activeStatusIndicator?.dispose();
 		this.activeStatusIndicator = indicator;
+		this.activeWorkingIndicatorEmbedded = false;
 		this.statusContainer.clear();
 		this.setEditorWorkingStatusIndicator(undefined);
 		if (indicator instanceof WorkingStatusIndicator && this.setEditorWorkingStatusIndicator(indicator)) {
+			this.activeWorkingIndicatorEmbedded = true;
 			return;
 		}
 		this.statusContainer.addChild(indicator);
@@ -2171,13 +2174,15 @@ export class InteractiveMode {
 			return;
 		}
 		const clearedIndicator = this.activeStatusIndicator;
+		const clearedIndicatorWasEmbedded = clearedIndicator?.kind === "working" && this.activeWorkingIndicatorEmbedded;
 		clearedIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
+		this.activeWorkingIndicatorEmbedded = false;
 		this.statusContainer.clear();
 		this.setEditorWorkingStatusIndicator(undefined);
 		if (
 			clearedIndicator &&
-			clearedIndicator.kind !== "working" &&
+			!clearedIndicatorWasEmbedded &&
 			this.options.tuiMode === "regular" &&
 			this.ui.getClearOnShrink()
 		) {
@@ -2768,7 +2773,8 @@ export class InteractiveMode {
 		this.editorContainer.addChild(this.editor as Component);
 		if (this.activeStatusIndicator instanceof WorkingStatusIndicator) {
 			this.statusContainer.clear();
-			if (!this.setEditorWorkingStatusIndicator(this.activeStatusIndicator)) {
+			this.activeWorkingIndicatorEmbedded = this.setEditorWorkingStatusIndicator(this.activeStatusIndicator);
+			if (!this.activeWorkingIndicatorEmbedded) {
 				this.statusContainer.addChild(this.activeStatusIndicator);
 			}
 		}
