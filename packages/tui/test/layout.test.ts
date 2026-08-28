@@ -303,6 +303,34 @@ describe("viewport layout", () => {
 		assert.strictEqual(thumbHeightFor(400), 2);
 	});
 
+	it("preserves only the underlying background beneath overlay scrollbar glyphs", () => {
+		const background = "\x1b[42m";
+		const borderForeground = "\x1b[31m";
+		const content = {
+			render: (width: number) =>
+				Array.from(
+					{ length: 8 },
+					() => `${background}${"x".repeat(width - 1)}${borderForeground}│\x1b[39m\x1b[49m`,
+				),
+			invalidate: () => {},
+		};
+		const scrollView = new ScrollView(content, {
+			scrollbar: "auto",
+			scrollbarTrackStyle: (text) => text,
+			scrollbarThumbStyle: (text) => text,
+		});
+		renderLayoutFrame(scrollView, 6, 4, () => {});
+		scrollView.scrollBy(1);
+		const frame = renderLayoutFrame(scrollView, 6, 4, () => {});
+
+		assert.deepStrictEqual(frame.lines.map(stripTerminalSequences), ["xxxxx│", "xxxxx┃", "xxxxx┃", "xxxxx│"]);
+		for (const line of frame.lines) {
+			assert.ok(line.includes(background));
+			assert.ok(!line.includes(borderForeground));
+			assert.ok(line.includes(`\x1b[0m\x1b]8;;\x07${background}`));
+		}
+	});
+
 	it("updates reserved scrollbar layout at runtime", () => {
 		const scrollView = new ScrollView(new Text("123456", 0, 0), { scrollbar: "always" });
 		const render = () => renderLayoutFrame(new HStack([scrollView], { align: "start" }), 6, 2, () => {});

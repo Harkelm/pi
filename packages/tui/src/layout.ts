@@ -3,7 +3,13 @@ import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
-import { extractAnsiCode, getGraphemeCellRange, sliceByColumn, visibleWidth } from "./utils.ts";
+import {
+	extractAnsiCode,
+	getActiveBackgroundAnsi,
+	getGraphemeCellRange,
+	sliceByColumn,
+	visibleWidth,
+} from "./utils.ts";
 
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 
@@ -245,7 +251,7 @@ function replaceScrollbarCell(
 	column: number,
 	totalWidth: number,
 	replacement: string,
-	preserveTargetStyle: boolean,
+	preserveTargetBackground: boolean,
 ): string {
 	if (isImageLine(line)) return line;
 
@@ -267,7 +273,7 @@ function replaceScrollbarCell(
 	const beforePadding = " ".repeat(Math.max(0, start - visibleWidth(before)));
 	const cellPaddingBefore = " ".repeat(Math.max(0, column - start));
 	const cellPaddingAfter = " ".repeat(Math.max(0, end - column - 1));
-	const targetStyle = preserveTargetStyle ? targetPrefix : "\x1b[0m\x1b]8;;\x07";
+	const targetStyle = `\x1b[0m\x1b]8;;\x07${preserveTargetBackground ? getActiveBackgroundAnsi(targetPrefix) : ""}`;
 	return `${before}${beforePadding}${targetStyle}${cellPaddingBefore}${replacement}${cellPaddingAfter}${after}`;
 }
 
