@@ -505,22 +505,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private getSearchNavigationDirectionAt(x: number, y: number): -1 | 1 | undefined {
 		const search = this.activeSearch;
-		if (!search) return undefined;
-		const topRow = y - 2;
-		if (topRow < 0) return undefined;
-		const topLine = stripTerminalSequences(this.previousScreen[topRow] ?? "");
-		const borderLine = stripTerminalSequences(this.previousScreen[y] ?? "");
-		for (let origin = 0; origin <= x; origin++) {
-			const direction = search.component.getNavigationDirectionAt(2, x - origin);
-			if (
-				direction !== undefined &&
-				sliceByColumn(topLine, origin, 1, true) === "┌" &&
-				sliceByColumn(borderLine, origin, 1, true) === "└"
-			) {
-				return direction;
-			}
+		const bounds = search?.overlay?.getBounds();
+		if (!search || !bounds) return undefined;
+		if (x < bounds.col || x >= bounds.col + bounds.width || y < bounds.row || y >= bounds.row + bounds.height) {
+			return undefined;
 		}
-		return undefined;
+		return search.component.getNavigationDirectionAt(y - bounds.row, x - bounds.col);
 	}
 
 	private handleSearchMouseEvent(event: SgrMouseEvent): boolean {
