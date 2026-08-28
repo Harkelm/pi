@@ -313,37 +313,65 @@ describe("InteractiveMode copy confirmation", () => {
 });
 
 type ClearStatusContext = {
-	activeStatusIndicator: { kind: "working"; dispose: () => void } | undefined;
+	activeStatusIndicator: { kind: "working" | "retry"; dispose: () => void } | undefined;
 	statusContainer: Container;
+	defaultEditor: { setWorkingStatusIndicator: (indicator: undefined) => void };
+	editor: { setWorkingStatusIndicator: (indicator: undefined) => void };
 	options: { tuiMode?: TuiMode };
 	ui: { getClearOnShrink: () => boolean };
 	idleStatus: Component;
+	setEditorWorkingStatusIndicator(indicator: undefined): boolean;
 };
 
 type InteractiveModePrototype = {
-	clearStatusIndicator(this: ClearStatusContext, kind?: "working"): void;
+	clearStatusIndicator(this: ClearStatusContext, kind?: "working" | "retry"): void;
+	setEditorWorkingStatusIndicator(this: ClearStatusContext, indicator: undefined): boolean;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
 
 describe("clear-on-shrink status spacing", () => {
-	it("reserves status height only on the main-screen renderer", () => {
-		for (const [tuiMode, expectedChildren] of [
-			["regular", 1],
-			["fullscreen", 0],
-		] as const) {
+	it("does not reserve separate status height for the editor-border working indicator", () => {
+		for (const tuiMode of ["regular", "fullscreen"] as const) {
 			const dispose = vi.fn();
+			const editor = { setWorkingStatusIndicator: vi.fn() };
 			const context: ClearStatusContext = {
 				activeStatusIndicator: { kind: "working", dispose },
 				statusContainer: new Container(),
+				defaultEditor: editor,
+				editor,
 				options: { tuiMode },
 				ui: { getClearOnShrink: () => true },
 				idleStatus: new Text("", 0, 0),
+				setEditorWorkingStatusIndicator: interactiveModePrototype.setEditorWorkingStatusIndicator,
 			};
 
 			interactiveModePrototype.clearStatusIndicator.call(context);
 
 			expect(dispose).toHaveBeenCalledOnce();
+			expect(context.statusContainer.children).toHaveLength(0);
+		}
+	});
+
+	it("reserves standalone status height only on the main-screen renderer", () => {
+		for (const [tuiMode, expectedChildren] of [
+			["regular", 1],
+			["fullscreen", 0],
+		] as const) {
+			const editor = { setWorkingStatusIndicator: vi.fn() };
+			const context: ClearStatusContext = {
+				activeStatusIndicator: { kind: "retry", dispose: vi.fn() },
+				statusContainer: new Container(),
+				defaultEditor: editor,
+				editor,
+				options: { tuiMode },
+				ui: { getClearOnShrink: () => true },
+				idleStatus: new Text("", 0, 0),
+				setEditorWorkingStatusIndicator: interactiveModePrototype.setEditorWorkingStatusIndicator,
+			};
+
+			interactiveModePrototype.clearStatusIndicator.call(context);
+
 			expect(context.statusContainer.children).toHaveLength(expectedChildren);
 		}
 	});

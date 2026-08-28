@@ -178,6 +178,14 @@ interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
 
+interface WorkingStatusEditor extends EditorComponent {
+	setWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): void;
+}
+
+function isWorkingStatusEditor(editor: EditorComponent): editor is WorkingStatusEditor {
+	return "setWorkingStatusIndicator" in editor && typeof editor.setWorkingStatusIndicator === "function";
+}
+
 function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
 }
@@ -455,7 +463,7 @@ export class InteractiveMode {
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: WorkingIndicatorOptions | undefined = undefined;
-	private readonly defaultWorkingMessage = "Working...";
+	private readonly defaultWorkingMessage = "Working";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
@@ -2139,10 +2147,22 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private setEditorWorkingStatusIndicator(indicator: WorkingStatusIndicator | undefined): boolean {
+		this.defaultEditor.setWorkingStatusIndicator(indicator);
+		if (this.editor === this.defaultEditor) return true;
+		if (!isWorkingStatusEditor(this.editor)) return false;
+		this.editor.setWorkingStatusIndicator(indicator);
+		return true;
+	}
+
 	private showStatusIndicator(indicator: StatusIndicator): void {
 		this.activeStatusIndicator?.dispose();
 		this.activeStatusIndicator = indicator;
 		this.statusContainer.clear();
+		this.setEditorWorkingStatusIndicator(undefined);
+		if (indicator instanceof WorkingStatusIndicator && this.setEditorWorkingStatusIndicator(indicator)) {
+			return;
+		}
 		this.statusContainer.addChild(indicator);
 	}
 
@@ -2150,11 +2170,17 @@ export class InteractiveMode {
 		if (kind && this.activeStatusIndicator?.kind !== kind) {
 			return;
 		}
-		const hadActiveStatusIndicator = this.activeStatusIndicator !== undefined;
-		this.activeStatusIndicator?.dispose();
+		const clearedIndicator = this.activeStatusIndicator;
+		clearedIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
 		this.statusContainer.clear();
-		if (hadActiveStatusIndicator && this.options.tuiMode === "regular" && this.ui.getClearOnShrink()) {
+		this.setEditorWorkingStatusIndicator(undefined);
+		if (
+			clearedIndicator &&
+			clearedIndicator.kind !== "working" &&
+			this.options.tuiMode === "regular" &&
+			this.ui.getClearOnShrink()
+		) {
 			this.statusContainer.addChild(this.idleStatus);
 		}
 	}
@@ -2165,6 +2191,8 @@ export class InteractiveMode {
 				this.ui,
 				this.workingMessage ?? this.defaultWorkingMessage,
 				this.workingIndicatorOptions,
+				(text) =>
+					(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(text),
 			),
 		);
 	}
@@ -2738,6 +2766,12 @@ export class InteractiveMode {
 		}
 
 		this.editorContainer.addChild(this.editor as Component);
+		if (this.activeStatusIndicator instanceof WorkingStatusIndicator) {
+			this.statusContainer.clear();
+			if (!this.setEditorWorkingStatusIndicator(this.activeStatusIndicator)) {
+				this.statusContainer.addChild(this.activeStatusIndicator);
+			}
+		}
 		this.ui.setFocus(this.editor as Component);
 		this.ui.requestRender();
 	}
@@ -4155,6 +4189,9 @@ export class InteractiveMode {
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
+		}
+		if (this.activeStatusIndicator?.kind === "working") {
+			this.activeStatusIndicator.invalidate();
 		}
 		this.ui.requestRender();
 	}

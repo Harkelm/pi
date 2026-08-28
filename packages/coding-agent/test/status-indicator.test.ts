@@ -1,19 +1,52 @@
-import type { TUI } from "@earendil-works/pi-tui";
+import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { IdleStatus, RetryStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
+import {
+	IdleStatus,
+	RetryStatusIndicator,
+	WorkingStatusIndicator,
+} from "../src/modes/interactive/components/status-indicator.ts";
+import { getEditorTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 describe("status indicators", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 	});
 
-	it("keeps idle status at the same height as status indicators", () => {
+	it("keeps idle status at the same height as standalone status indicators", () => {
 		const idleStatus = new IdleStatus();
 
 		const lines = idleStatus.render(20);
 		expect(lines).toHaveLength(2);
 		expect(lines).toEqual([" ".repeat(20), " ".repeat(20)]);
+	});
+
+	it("embeds the default working indicator in the editor border", () => {
+		initTheme("dark");
+		const tui = {
+			requestRender: vi.fn(),
+			terminal: { rows: 10 },
+		} as unknown as TUI;
+		const editor = new CustomEditor(tui, getEditorTheme(), KeybindingsManager.create());
+		editor.borderColor = theme.getThinkingBorderColor("high");
+		const indicator = new WorkingStatusIndicator(tui, "Working", undefined, (text) => editor.borderColor(text));
+		editor.setWorkingStatusIndicator(indicator);
+
+		const topBorder = editor.render(20)[0]!;
+		expect(stripAnsi(topBorder)).toBe("── ⠋ Working ───────");
+		expect(visibleWidth(topBorder)).toBe(20);
+		expect(topBorder.split(theme.getFgAnsi("thinkingHigh"))).toHaveLength(5);
+		expect(topBorder).not.toContain("...");
+		expect(stripAnsi(editor.render(14)[0]!)).toBe("── ⠋ Working ─");
+
+		editor.setText(Array.from({ length: 10 }, (_, index) => `line ${index}`).join("\n"));
+		expect(stripAnsi(editor.render(40)[0]!)).toBe(`── ⠋ Working ── ↑ 5 more ${"─".repeat(15)}`);
+		expect(stripAnsi(editor.render(24)[0]!)).toBe("── ⠋ ── ↑ 5 more ───────");
+		expect(stripAnsi(editor.render(14)[0]!)).toBe(`── ⠋ ${"─".repeat(9)}`);
+		expect(stripAnsi(editor.render(4)[0]!)).toContain("⠋");
+		indicator.dispose();
 	});
 
 	it("disposes retry countdown updates", () => {
