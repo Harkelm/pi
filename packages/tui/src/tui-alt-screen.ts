@@ -152,6 +152,8 @@ export interface TuiAltScreenOptions {
 	searchMatchStyle?: (text: string) => string;
 	/** Style the current transcript search match. */
 	searchCurrentMatchStyle?: (text: string) => string;
+	/** Style a transcript search navigation button. */
+	searchNavigationButtonStyle?: (text: string, hovered: boolean) => string;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
@@ -200,6 +202,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly mouseEnabled: boolean;
 	private readonly searchMatchStyle: (text: string) => string;
 	private readonly searchCurrentMatchStyle: (text: string) => string;
+	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
@@ -224,6 +227,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.mouseEnabled = options.mouse ?? true;
 		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
+		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
@@ -452,7 +456,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.closeSearch();
 			return;
 		}
-		const component = new AltScreenSearchComponent((query) => this.updateSearchQuery(query));
+		const component = new AltScreenSearchComponent(
+			(query) => this.updateSearchQuery(query),
+			this.searchNavigationButtonStyle,
+		);
 		const search: ActiveSearch = {
 			component,
 			query: "",
@@ -496,25 +503,36 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
-	private handleSearchMouseEvent(event: SgrMouseEvent): boolean {
+	private getSearchNavigationDirectionAt(x: number, y: number): -1 | 1 | undefined {
 		const search = this.activeSearch;
-		if (!search || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
-		const topRow = event.y - 2;
-		if (topRow < 0) return false;
+		if (!search) return undefined;
+		const topRow = y - 2;
+		if (topRow < 0) return undefined;
 		const topLine = stripTerminalSequences(this.previousScreen[topRow] ?? "");
-		const borderLine = stripTerminalSequences(this.previousScreen[event.y] ?? "");
-		for (let origin = 0; origin <= event.x; origin++) {
-			const direction = search.component.getNavigationDirectionAt(2, event.x - origin);
+		const borderLine = stripTerminalSequences(this.previousScreen[y] ?? "");
+		for (let origin = 0; origin <= x; origin++) {
+			const direction = search.component.getNavigationDirectionAt(2, x - origin);
 			if (
 				direction !== undefined &&
 				sliceByColumn(topLine, origin, 1, true) === "┌" &&
 				sliceByColumn(borderLine, origin, 1, true) === "└"
 			) {
-				this.navigateSearch(direction);
-				return true;
+				return direction;
 			}
 		}
-		return false;
+		return undefined;
+	}
+
+	private handleSearchMouseEvent(event: SgrMouseEvent): boolean {
+		const search = this.activeSearch;
+		if (!search) return false;
+		const direction = this.getSearchNavigationDirectionAt(event.x, event.y);
+		if (search.component.setHoveredNavigationDirection(direction)) this.requestRender();
+		if (direction === undefined || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) {
+			return false;
+		}
+		this.navigateSearch(direction);
+		return true;
 	}
 
 	private refreshSearch(layout: LayoutFrame): boolean {
@@ -591,6 +609,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.selectionPressActive = false;
 			this.stopSelectionAutoScroll();
 			this.stopScrollbarHover();
+			if (this.activeSearch?.component.setHoveredNavigationDirection(undefined)) this.requestRender();
 			this.stopScrollbarDrag();
 			this.pressedUrl = undefined;
 			this.selectionDragged = false;

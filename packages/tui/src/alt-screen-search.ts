@@ -106,20 +106,26 @@ export function getAltScreenSearchMatchKey(match: AltScreenSearchMatch): string 
 export class AltScreenSearchComponent implements Component, Focusable {
 	private readonly input = new Input({
 		prompt: " ",
-		placeholder: "find in transcript",
+		placeholder: "Find in transcript",
 		placeholderStyle: (text) => `\x1b[2m${text}\x1b[22m`,
 	});
 	private readonly onQueryChange: (query: string) => void;
+	private readonly navigationButtonStyle: (text: string, hovered: boolean) => string;
 	private resultCount = 0;
 	private resultIndex = -1;
 	private previousButtonStart = -1;
 	private previousButtonEnd = -1;
 	private nextButtonStart = -1;
 	private nextButtonEnd = -1;
+	private hoveredNavigationDirection: -1 | 1 | undefined;
 	private _focused = false;
 
-	constructor(onQueryChange: (query: string) => void) {
+	constructor(
+		onQueryChange: (query: string) => void,
+		navigationButtonStyle: (text: string, hovered: boolean) => string = (text) => text,
+	) {
 		this.onQueryChange = onQueryChange;
+		this.navigationButtonStyle = navigationButtonStyle;
 	}
 
 	get focused(): boolean {
@@ -141,6 +147,12 @@ export class AltScreenSearchComponent implements Component, Focusable {
 		if (column >= this.previousButtonStart && column < this.previousButtonEnd) return -1;
 		if (column >= this.nextButtonStart && column < this.nextButtonEnd) return 1;
 		return undefined;
+	}
+
+	setHoveredNavigationDirection(direction: -1 | 1 | undefined): boolean {
+		if (direction === this.hoveredNavigationDirection) return false;
+		this.hoveredNavigationDirection = direction;
+		return true;
 	}
 
 	handleInput(data: string): void {
@@ -184,30 +196,41 @@ export class AltScreenSearchComponent implements Component, Focusable {
 		const inputPadding = " ".repeat(Math.max(0, inputWidth - visibleWidth(inputLine)));
 		const content = `${inputLine}${inputPadding}${resultText}`;
 
-		let previousHint = `↑ ${previousKey}`;
-		let nextHint = `↓ ${nextKey}`;
-		let hintSeparator = " · ";
-		const availableHintWidth = Math.max(0, innerWidth - 3);
-		if (visibleWidth(previousHint) + visibleWidth(hintSeparator) + visibleWidth(nextHint) > availableHintWidth) {
-			previousHint = "↑";
-			nextHint = "↓";
-			hintSeparator = " ";
+		let previousButton = `↑ ${previousKey}`;
+		let nextButton = `↓ ${nextKey}`;
+		let separator = " · ";
+		const outerGapWidth = 1;
+		const availableControlsWidth = Math.max(0, innerWidth - outerGapWidth * 2 - 1);
+		let controlsWidth = visibleWidth(previousButton) + visibleWidth(separator) + visibleWidth(nextButton);
+		if (controlsWidth > availableControlsWidth) {
+			previousButton = "↑";
+			nextButton = "↓";
+			separator = " ";
+			controlsWidth = visibleWidth(previousButton) + visibleWidth(separator) + visibleWidth(nextButton);
 		}
-		const hint = truncateToWidth(`${previousHint}${hintSeparator}${nextHint}`, availableHintWidth, "");
-		const framedHint = hint ? ` ${hint} ` : "";
-		const rightRuleWidth = framedHint && innerWidth > visibleWidth(framedHint) ? 1 : 0;
-		const leftRuleWidth = Math.max(0, innerWidth - visibleWidth(framedHint) - rightRuleWidth);
-		const previousStart = 2 + leftRuleWidth;
-		this.previousButtonStart = hint ? previousStart : -1;
-		this.previousButtonEnd = hint ? previousStart + visibleWidth(previousHint) : -1;
-		this.nextButtonStart = hint ? this.previousButtonEnd + visibleWidth(hintSeparator) : -1;
-		this.nextButtonEnd = hint ? this.nextButtonStart + visibleWidth(nextHint) : -1;
+		const showButtons = controlsWidth <= availableControlsWidth;
+		const renderedButtons = showButtons
+			? this.navigationButtonStyle(previousButton, this.hoveredNavigationDirection === -1) +
+				separator +
+				this.navigationButtonStyle(nextButton, this.hoveredNavigationDirection === 1)
+			: "";
+		const outerGapsWidth = showButtons ? outerGapWidth * 2 : 0;
+		const rightRuleWidth = renderedButtons && innerWidth > controlsWidth + outerGapsWidth ? 1 : 0;
+		const leftRuleWidth = Math.max(
+			0,
+			innerWidth - (showButtons ? controlsWidth : 0) - outerGapsWidth - rightRuleWidth,
+		);
+		const previousStart = 1 + leftRuleWidth + outerGapWidth;
+		this.previousButtonStart = showButtons ? previousStart : -1;
+		this.previousButtonEnd = showButtons ? previousStart + visibleWidth(previousButton) : -1;
+		this.nextButtonStart = showButtons ? this.previousButtonEnd + visibleWidth(separator) : -1;
+		this.nextButtonEnd = showButtons ? this.nextButtonStart + visibleWidth(nextButton) : -1;
 
 		if (safeWidth === 1) return ["┌", "│", "└"];
 		return [
 			`┌${"─".repeat(innerWidth)}┐`,
 			`│${content}│`,
-			`└${"─".repeat(leftRuleWidth)}${framedHint}${"─".repeat(rightRuleWidth)}┘`,
+			`└${"─".repeat(leftRuleWidth)}${renderedButtons ? " " : ""}${renderedButtons}${renderedButtons ? " " : ""}${"─".repeat(rightRuleWidth)}┘`,
 		];
 	}
 }

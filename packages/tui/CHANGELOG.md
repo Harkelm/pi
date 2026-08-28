@@ -9,7 +9,7 @@
 
 ### Changed
 
-- Changed fullscreen transcript search to use a bordered, placeholder-based input with a muted result count, right-aligned clickable key-and-arrow controls, and open-shortcut toggling.
+- Changed fullscreen transcript search to use a bordered, placeholder-based input with a muted result count, right-aligned clickable key-and-arrow buttons with configurable hover styling, and open-shortcut toggling.
 
 ### Fixed
 

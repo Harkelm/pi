@@ -424,7 +424,7 @@ describe("TuiAltScreen", () => {
 		assert.strictEqual(lines.length, 3);
 		assert.ok(lines.every((line) => visibleWidth(line) === 48));
 		assert.match(lines[0] ?? "", /^┌─+┐$/);
-		assert.match(lines[1] ?? "", /^│ find in transcript +│$/);
+		assert.match(lines[1] ?? "", /^│ Find in transcript +│$/);
 		assert.ok(rendered[1]?.includes("\x1b[2m"));
 		assert.match(lines[2] ?? "", /^└─+ ↑ Shift\+Enter · ↓ Enter ─┘$/);
 		const controls = lines[2] ?? "";
@@ -441,12 +441,14 @@ describe("TuiAltScreen", () => {
 		assert.ok(populated[1]?.includes("n"));
 		assert.ok(populated[1]?.includes("1/2"));
 		assert.ok(populatedRender[1]?.includes("\x1b[2m 1/2 \x1b[22m"));
-		assert.ok(!populated.some((line) => line.includes("find in transcript")));
+		assert.ok(!populated.some((line) => line.includes("Find in transcript")));
 	});
 
-	it("navigates transcript search with clickable arrows and toggles it with its shortcut", async () => {
-		const terminal = new VirtualTerminal(120, 6);
-		const tui = new TuiAltScreen(terminal);
+	it("navigates transcript search with hoverable arrow buttons and toggles it with its shortcut", async () => {
+		const terminal = new RecordingTerminal(120, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			searchNavigationButtonStyle: (text, hovered) => `${hovered ? "\x1b[45m" : "\x1b[44m"}${text}\x1b[49m`,
+		});
 		tui.addChild(new Text("needle one\nmiddle\nneedle two\nend", 0, 0));
 		tui.start();
 		await terminal.waitForRender();
@@ -461,6 +463,14 @@ describe("TuiAltScreen", () => {
 		let arrowRow = viewport.findIndex((line) => line.includes("↑") && line.includes("↓"));
 		let arrowColumn = viewport[arrowRow]?.lastIndexOf("Enter") ?? -1;
 		assert.ok(arrowRow >= 0 && arrowColumn >= 0);
+		const hoverEventCount = terminal.events.length;
+		terminal.sendInput(`\x1b[<35;${arrowColumn + 1};${arrowRow + 1}M`);
+		await terminal.waitForRender();
+		assert.ok(
+			terminal.events
+				.slice(hoverEventCount)
+				.some((event) => event.type === "write" && event.data.includes("\x1b[45m↓ Enter\x1b[49m")),
+		);
 		terminal.sendInput(`\x1b[<0;${arrowColumn + 1};${arrowRow + 1}M`);
 		await terminal.waitForRender();
 		viewport = terminal.getViewport();
