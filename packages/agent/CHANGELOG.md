@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `telemetryContext` support to `Agent` and real model-request spans with latency, usage, cost, response, and normalized stop metadata. Built-in spans omit prompt and response content.
+
 ## [0.84.4] - 2026-08-28
 
 ### Breaking Changes

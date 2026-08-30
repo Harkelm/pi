@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added optional OpenTelemetry export for real coding-session run and model-request spans. Export stays disabled unless `PI_OTEL_EXPORTER_OTLP_ENDPOINT` is set, and default spans omit prompts, responses, tool content, and error messages.
 - Added final active tool names to RPC `get_state` responses.
 
 ### Fixed

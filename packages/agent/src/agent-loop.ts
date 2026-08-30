@@ -10,6 +10,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import { startAiSpan } from "./harness/telemetry.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -283,36 +284,103 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
+	if (!config.telemetryContext) {
+		return streamAssistantResponseBody(context, config, signal, emit, streamFunction);
+	}
+
+	return startAiSpan(
+		config.telemetryContext,
+		"pi.ai.request",
+		{
+			"pi.ai.operation": "stream",
+			"pi.ai.provider": config.model.provider,
+			"pi.ai.model": config.model.id,
+			"pi.ai.api": config.model.api,
+			"pi.ai.streaming": true,
+			"pi.ai.deferred": config.deferred !== undefined && config.deferred !== false,
+		},
+		async (span) => {
+			const startedAt = performance.now();
+			let firstChunkMs: number | undefined;
+			let chunkCount = 0;
+			const finalMessage = await streamAssistantResponseBody(
+				context,
+				config,
+				signal,
+				emit,
+				streamFunction,
+				span,
+				() => {
+					chunkCount++;
+					firstChunkMs ??= performance.now() - startedAt;
+				},
+			);
+			span.setAttributes({
+				...(finalMessage.responseId ? { "pi.ai.response.id": finalMessage.responseId } : {}),
+				"pi.ai.response.model": finalMessage.responseModel ?? finalMessage.model,
+				"pi.ai.response.stop_reason": normalizeTelemetryStopReason(finalMessage.stopReason),
+				"pi.ai.usage.input_tokens": finalMessage.usage.input,
+				"pi.ai.usage.output_tokens": finalMessage.usage.output,
+				"pi.ai.usage.cache_read_tokens": finalMessage.usage.cacheRead,
+				"pi.ai.usage.cache_write_tokens": finalMessage.usage.cacheWrite,
+				"pi.ai.usage.total_tokens": finalMessage.usage.totalTokens,
+				"pi.ai.usage.cost": finalMessage.usage.cost.total,
+				...(firstChunkMs === undefined ? {} : { "pi.ai.stream.time_to_first_chunk_ms": firstChunkMs }),
+				"pi.ai.stream.chunk_count": chunkCount,
+				...(finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted"
+					? { "pi.ai.error.type": finalMessage.stopReason === "aborted" ? "aborted" : "provider_error" }
+					: {}),
+			});
+			if (finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted") {
+				span.setStatus({ status: "error" });
+			}
+			return finalMessage;
+		},
+	);
+}
+
+function normalizeTelemetryStopReason(
+	stopReason: AssistantMessage["stopReason"],
+): "stop" | "length" | "tool_use" | "error" | "aborted" | "deferred" {
+	if (stopReason === "toolUse") return "tool_use";
+	if (stopReason === "pending") return "error";
+	return stopReason;
+}
+
+async function streamAssistantResponseBody(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFunction: StreamFn,
+	requestTelemetryContext = config.telemetryContext,
+	onChunk?: () => void,
+): Promise<AssistantMessage> {
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
 
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
-
-	// Build LLM context
 	const llmContext: Context = {
 		systemPrompt: context.systemPrompt,
 		messages: llmMessages,
 		tools: context.tools,
 	};
-
-	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
-
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,
 		signal,
+		telemetryContext: requestTelemetryContext,
 	});
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
 	for await (const event of response) {
+		onChunk?.();
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;

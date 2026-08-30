@@ -13,17 +13,19 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import type {
-	Agent,
-	AgentContext,
-	AgentEvent,
-	AgentMessage,
-	AgentState,
-	AgentTool,
-	PrepareNextTurnContext,
-	ThinkingLevel,
+import {
+	type Agent,
+	type AgentContext,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentState,
+	type AgentTool,
+	type PrepareNextTurnContext,
+	startHarnessSpan,
+	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import type {
@@ -47,6 +49,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -228,6 +231,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Optional telemetry parent for session run spans. */
+	telemetryContext?: TelemetryContext;
 }
 
 export interface ExtensionBindings {
@@ -370,6 +375,7 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
+	private readonly _telemetryContext?: TelemetryContext;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -391,6 +397,7 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
+		this._telemetryContext = config.telemetryContext;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -1122,6 +1129,57 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (!this._telemetryContext) {
+			return this._runAgentPromptBody(messages);
+		}
+
+		const operationId = randomUUID();
+		await startHarnessSpan(
+			this._telemetryContext,
+			"pi.harness.run",
+			{
+				"pi.session.id": this.sessionManager.getSessionId(),
+				"pi.lane.name": "main",
+				"pi.operation.id": operationId,
+				"pi.operation.recovery": false,
+				"pi.operation.kind": "run",
+			},
+			async (span) => {
+				const previousTelemetryContext = this.agent.telemetryContext;
+				this.agent.telemetryContext = span;
+				try {
+					await this._runAgentPromptBody(messages);
+					const finalMessage = [...this.agent.state.messages]
+						.reverse()
+						.find((message): message is AssistantMessage => message.role === "assistant");
+					const outcome =
+						finalMessage?.stopReason === "aborted"
+							? "aborted"
+							: finalMessage?.stopReason === "error"
+								? "failed"
+								: finalMessage?.stopReason === "deferred"
+									? "suspended"
+									: "completed";
+					span.setAttributes({
+						"pi.operation.outcome": outcome,
+						...(outcome === "failed" ? { "pi.error.type": "provider_error" } : {}),
+					});
+					if (outcome === "failed" || outcome === "aborted") span.setStatus({ status: "error" });
+				} catch (error) {
+					span.setAttributes({
+						"pi.operation.outcome": "failed",
+						"pi.error.type": "exception",
+					});
+					span.setStatus({ status: "error" });
+					throw error;
+				} finally {
+					this.agent.telemetryContext = previousTelemetryContext;
+				}
+			},
+		);
+	}
+
+	private async _runAgentPromptBody(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);

@@ -5,7 +5,8 @@
  *
  * Test with: npx tsx src/cli-new.ts [args...]
  */
-import { APP_NAME } from "./config.ts";
+import { APP_NAME, VERSION } from "./config.ts";
+import { createApplicationTelemetry, shutdownApplicationTelemetry } from "./core/application-telemetry.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { main } from "./main.ts";
 
@@ -18,4 +19,9 @@ process.emitWarning = (() => {}) as typeof process.emitWarning;
 // Runtime settings are applied once SettingsManager has loaded global/project settings.
 configureHttpDispatcher();
 
-main(process.argv.slice(2));
+const telemetryRuntime = createApplicationTelemetry(VERSION);
+try {
+	await main(process.argv.slice(2), { telemetryRuntime });
+} finally {
+	await shutdownApplicationTelemetry(telemetryRuntime);
+}

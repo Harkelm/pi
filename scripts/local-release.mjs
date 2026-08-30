@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const packages = [
 	{ directory: "packages/telemetry", name: "@earendil-works/pi-telemetry" },
+	{ directory: "packages/telemetry-otel", name: "@earendil-works/pi-telemetry-otel" },
 	{ directory: "packages/ai", name: "@earendil-works/pi-ai" },
 	{ directory: "packages/tui", name: "@earendil-works/pi-tui" },
 	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core" },

@@ -7,6 +7,7 @@
 
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
+import type { OpenTelemetryRuntime } from "@earendil-works/pi-telemetry-otel";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
@@ -556,6 +557,7 @@ async function promptForMissingSessionCwd(
 
 export interface MainOptions {
 	extensionFactories?: InlineExtension[];
+	telemetryRuntime?: OpenTelemetryRuntime;
 }
 
 export async function main(args: string[], options?: MainOptions) {
@@ -824,6 +826,7 @@ export async function main(args: string[], options?: MainOptions) {
 			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
+			telemetryContext: options?.telemetryRuntime?.contextForSession(sessionManager.getSessionId()),
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
