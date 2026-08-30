@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed `PI_OTEL_DISABLED=1` so it overrides an inherited telemetry endpoint.
 - Fixed explicit `--tools` allowlists silently dropping unregistered tool names. Pi now lists every unknown name and exits before a model request.
 
 ## [0.84.4] - 2026-08-28
