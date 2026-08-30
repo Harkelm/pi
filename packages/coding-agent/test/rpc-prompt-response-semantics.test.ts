@@ -190,6 +190,28 @@ describe("RPC prompt response semantics", () => {
 		rpcIo.lineHandler = undefined;
 	});
 
+	it("reports the final active tool inventory", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "state-1", type: "get_state" }));
+
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({
+						id: "state-1",
+						type: "response",
+						command: "get_state",
+						success: true,
+						data: expect.objectContaining({ activeToolNames: ["read", "bash", "edit", "write"] }),
+					}),
+				);
+			});
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one failure response when prompt preflight rejects", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({
 			withAuth: false,

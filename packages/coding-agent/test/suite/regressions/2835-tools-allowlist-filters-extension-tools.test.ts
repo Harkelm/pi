@@ -25,7 +25,7 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 		}
 	});
 
-	async function createSession(allowedToolNames?: string[]) {
+	async function createSession(allowedToolNames?: string[], bindExtensions = true) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = SessionManager.inMemory(tempDir);
 		const resourceLoader = new DefaultResourceLoader({
@@ -61,7 +61,9 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 			resourceLoader,
 			tools: allowedToolNames,
 		});
-		await session.bindExtensions({});
+		if (bindExtensions) {
+			await session.bindExtensions({});
+		}
 		return session;
 	}
 
@@ -89,6 +91,15 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.systemPrompt).toContain("Available tools:\n(none)");
 		expect(session.systemPrompt).not.toContain("dynamic_tool");
+		session.dispose();
+	});
+
+	it("rejects all unregistered names after extension startup", async () => {
+		const session = await createSession(["missing_first", "dynamic_tool", "missing_second"], false);
+
+		await expect(session.bindExtensions({})).rejects.toThrow(
+			"Unknown tools in --tools allowlist: missing_first, missing_second",
+		);
 		session.dispose();
 	});
 });

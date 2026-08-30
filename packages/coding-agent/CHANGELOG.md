@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added final active tool names to RPC `get_state` responses.
+
+### Fixed
+
+- Fixed explicit `--tools` allowlists silently dropping unregistered tool names. Pi now lists every unknown name and exits before a model request.
+
 ## [0.84.4] - 2026-08-28
 
 ### New Features

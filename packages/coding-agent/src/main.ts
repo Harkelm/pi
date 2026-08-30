@@ -926,7 +926,13 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		try {
+			await runRpcMode(runtime);
+		} catch (error: unknown) {
+			console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+			await runtime.dispose();
+			process.exit(1);
+		}
 	} else if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,

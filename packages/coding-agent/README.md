@@ -585,6 +585,8 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
+Pi exits during startup if an explicit `--tools` allowlist names a tool that no built-in, extension, or custom tool registered.
+
 Available built-in tools: `read`, `bash`, `powershell` (Windows), `edit`, `write`, `grep`, `find`, `ls`
 
 ### Resource Options

@@ -962,6 +962,24 @@ export class AgentSession {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
+	/** Fail startup when an explicit tool allowlist contains unregistered names. */
+	assertToolAllowlistIsRegistered(): void {
+		if (!this._allowedToolNames) return;
+
+		const registeredToolNames = new Set(this._baseToolDefinitions.keys());
+		for (const tool of this._extensionRunner.getAllRegisteredTools()) {
+			registeredToolNames.add(tool.definition.name);
+		}
+		for (const tool of this._customTools) {
+			registeredToolNames.add(tool.name);
+		}
+
+		const unregisteredToolNames = Array.from(this._allowedToolNames).filter((name) => !registeredToolNames.has(name));
+		if (unregisteredToolNames.length > 0) {
+			throw new Error(`Unknown tools in --tools allowlist: ${unregisteredToolNames.join(", ")}`);
+		}
+	}
+
 	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
@@ -2458,6 +2476,7 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		this.assertToolAllowlistIsRegistered();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
