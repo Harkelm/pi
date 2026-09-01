@@ -16,7 +16,12 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
-import { completeSummarization, estimateTokens, getSummarizationFailure } from "./compaction.ts";
+import {
+	completeSummarization,
+	estimateTokens,
+	getSummarizationFailure,
+	SUMMARY_AUTHORITY_RULES,
+} from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -257,32 +262,40 @@ Summary of that exploration:
 
 const BRANCH_SUMMARY_PROMPT = `Create a structured summary of this conversation branch for context when returning later.
 
+${SUMMARY_AUTHORITY_RULES}
+
 Use this EXACT format:
 
-## Goal
-[What was the user trying to accomplish in this branch?]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned]
-- [Or "(none)" if none were mentioned]
+## Reported User Authority
+- **Request (verbatim):** [Exact user text that defined this branch, or "(unclear in summarized context)"]
+- **Accepted plan/specification/notes:** [Exact paths and their role, or "(none)"]
+- **Explicit constraints:** [Only established constraints, or "(none)"]
+- **Completion condition:** [Established stopping point, or "(unclear)"]
 
 ## Progress
 ### Done
-- [x] [Completed tasks/changes]
+- [x] [Completed work and evidence]
 
 ### In Progress
-- [ ] [Work that was started but not finished]
+- [ ] [Work actually in progress]
 
 ### Blocked
-- [Issues preventing progress, if any]
+- [Current blockers, or "(none)"]
 
 ## Key Decisions
-- **[Decision]**: [Brief rationale]
+- **[Decision]**: [Brief rationale and who made or accepted it]
 
-## Next Steps
-1. [What should happen next to continue this work]
+## Remaining Authorized Work
+1. [Only unfinished work required by the reported user authority]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+## Suggestions (Not Authorized)
+- [Proposed or speculative work that requires a new user decision, or "(none)"]
+
+## Critical Context
+- [Data, deviations, or references needed to understand the abandoned branch]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, error messages, and quoted user text.`;
 
 /**
  * Generate a summary of abandoned branch entries.

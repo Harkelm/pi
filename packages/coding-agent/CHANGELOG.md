@@ -7,6 +7,10 @@
 - Added optional OpenTelemetry export for real coding-session run and model-request spans. Export stays disabled unless `PI_OTEL_EXPORTER_OTLP_ENDPOINT` is set, and default spans omit prompts, responses, tool content, and error messages.
 - Added final active tool names to RPC `get_state` responses.
 
+### Changed
+
+- Changed built-in compaction and branch summaries to report user scope separately from unapproved suggestions. All generated and extension-provided summaries are framed as context rather than direct user authority before model requests.
+
 ### Fixed
 
 - Fixed `PI_OTEL_DISABLED=1` so it overrides an inherited telemetry endpoint.

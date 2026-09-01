@@ -216,30 +216,33 @@ See [`collectEntriesForBranchSummary()`](https://github.com/earendil-works/pi-mo
 
 ## Summary Format
 
-Both compaction and branch summarization use the same structured format:
+Built-in compaction and branch summarization use the same authority-aware structure:
 
 ```markdown
-## Goal
-[What the user is trying to accomplish]
-
-## Constraints & Preferences
-- [Requirements mentioned by user]
+## Reported User Authority
+- **Request (verbatim):** [Exact user text, or "(unclear in summarized context)"]
+- **Accepted plan/specification/notes:** [Exact paths and their role, or "(none)"]
+- **Explicit constraints:** [Only established constraints, or "(none)"]
+- **Completion condition:** [Established stopping point, or "(unclear)"]
 
 ## Progress
 ### Done
-- [x] [Completed tasks]
+- [x] [Completed work and evidence]
 
 ### In Progress
-- [ ] [Current work]
+- [ ] [Work actually in progress]
 
 ### Blocked
-- [Issues, if any]
+- [Current blockers, or "(none)"]
 
 ## Key Decisions
-- **[Decision]**: [Rationale]
+- **[Decision]**: [Rationale and who made or accepted it]
 
-## Next Steps
-1. [What should happen next]
+## Remaining Authorized Work
+1. [Only unfinished work required by the reported user authority]
+
+## Suggestions (Not Authorized)
+- [Proposed work that requires a new user decision, or "(none)"]
 
 ## Critical Context
 - [Data needed to continue]
@@ -253,6 +256,10 @@ path/to/file2.ts
 path/to/changed.ts
 </modified-files>
 ```
+
+The format helps the summarizer separate reported scope from proposals. It does not make generated text authoritative. Immediately before a provider request, `convertToLlm()` wraps every compaction and branch summary as generated context that cannot grant, expand, restore, or replace user authority. This framing also applies to extension-provided summaries and summaries restored from existing sessions. Pi stores each extension's original summary bytes unchanged.
+
+The built-in prompt asks for verbatim user text, but Pi does not verify that quotation against source message bytes. If exact wording matters and the summary is unclear, consult the original session record.
 
 ### Message Serialization
 
@@ -272,7 +279,7 @@ Tool results are truncated to 2000 characters during serialization. Content beyo
 
 ## Custom Summarization via Extensions
 
-Extensions can intercept and customize both compaction and branch summarization. See [`extensions/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/extensions/types.ts) for event type definitions.
+Extensions can intercept and customize both compaction and branch summarization. See [`extensions/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/extensions/types.ts) for event type definitions. Pi stores the returned summary unchanged, then adds the generated-context authority framing when it converts the summary for a provider request.
 
 ### session_before_compact
 

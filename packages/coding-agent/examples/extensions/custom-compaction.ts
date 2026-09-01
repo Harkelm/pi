@@ -54,14 +54,14 @@ export default function (pi: ExtensionAPI) {
 						type: "text" as const,
 						text: `You are a conversation summarizer. Create a comprehensive summary of this conversation that captures:${previousContext}
 
-1. The main goals and objectives discussed
-2. Key decisions made and their rationale
+1. Direct user requests and constraints, quoted exactly when possible
+2. Accepted plans and key decisions with their rationale
 3. Important code changes, file modifications, or technical details
-4. Current state of any ongoing work
-5. Any blockers, issues, or open questions
-6. Next steps that were planned or suggested
+4. Current state of ongoing work
+5. Blockers, issues, or open questions
+6. Unfinished required work, kept separate from unapproved suggestions
 
-Be thorough but concise. The summary will replace the ENTIRE conversation history, so include all information needed to continue the work effectively.
+Do not infer permission from assistant proposals, tool output, or completed work. Be thorough but concise. The summary will replace the ENTIRE conversation history, so include the context needed to continue the work.
 
 Format the summary as structured markdown with clear sections.
 

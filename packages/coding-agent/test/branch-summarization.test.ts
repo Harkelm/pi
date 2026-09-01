@@ -1,6 +1,7 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
+	type Context,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
 	type Model,
@@ -44,9 +45,11 @@ function response(content: AssistantMessage["content"]): AssistantMessage {
 }
 
 describe("branch summarization", () => {
-	it("does not override tool choice for branch summaries", async () => {
+	it("uses the authority-safe default prompt without overriding tool choice", async () => {
+		let requestContext: Context | undefined;
 		let requestOptions: SimpleStreamOptions | undefined;
-		const streamFn: StreamFn = (_model, _context, options) => {
+		const streamFn: StreamFn = (_model, context, options) => {
+			requestContext = context;
 			requestOptions = options;
 			const stream = createAssistantMessageEventStream();
 			queueMicrotask(() =>
@@ -62,6 +65,11 @@ describe("branch summarization", () => {
 		});
 
 		expect(requestOptions?.toolChoice).toBeUndefined();
+		const prompt = JSON.stringify(requestContext?.messages);
+		expect(prompt).toContain("## Reported User Authority");
+		expect(prompt).toContain("## Remaining Authorized Work");
+		expect(prompt).toContain("## Suggestions (Not Authorized)");
+		expect(prompt).not.toContain("## Next Steps");
 	});
 
 	it("rejects tool calls from branch summaries", async () => {
