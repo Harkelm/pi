@@ -10,7 +10,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
-import { startAiSpan } from "./harness/telemetry.ts";
+import { type HarnessTelemetrySpan, startAiSpan, startHarnessSpan } from "./harness/telemetry.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -165,6 +165,7 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
+	let turnIndex = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -209,46 +210,21 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
-			newMessages.push(message);
-
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				await emit({ type: "turn_end", message, toolResults: [] });
+			const completedTurn = await executeTurn(
+				currentContext,
+				newMessages,
+				config,
+				signal,
+				emit,
+				streamFunction,
+				turnIndex++,
+			);
+			if (completedTurn.terminal) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
-
-			// Check for tool calls
-			const toolCalls = message.content.filter((c) => c.type === "toolCall");
-
-			const toolResults: ToolResultMessage[] = [];
-			hasMoreToolCalls = false;
-			if (toolCalls.length > 0) {
-				// A "length" stop means the output was cut off by the token limit, so
-				// every tool call in the message may carry truncated arguments. Fail
-				// them all instead of executing potentially borked calls.
-				const executedToolBatch =
-					message.stopReason === "length"
-						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-						: await executeToolCalls(currentContext, message, config, signal, emit);
-				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
-
-				for (const result of toolResults) {
-					currentContext.messages.push(result);
-					newMessages.push(result);
-				}
-			}
-
-			await emit({ type: "turn_end", message, toolResults });
-
-			lastCompletedTurn = {
-				message,
-				toolResults,
-				context: currentContext,
-				newMessages,
-			};
+			hasMoreToolCalls = completedTurn.hasMoreToolCalls;
+			lastCompletedTurn = completedTurn.context;
 
 			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {
 				await emit({ type: "agent_end", messages: newMessages });
@@ -271,6 +247,68 @@ async function runLoop(
 	}
 
 	await emit({ type: "agent_end", messages: newMessages });
+}
+
+type CompletedTurn =
+	| { terminal: true }
+	| { terminal: false; hasMoreToolCalls: boolean; context: PrepareNextTurnContext };
+
+async function executeTurn(
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFunction: StreamFn,
+	turnIndex: number,
+): Promise<CompletedTurn> {
+	const operation = config.telemetryOperation;
+	const turnId = operation ? `${operation.operationId}:${operation.stepAttempt}:${turnIndex}` : undefined;
+	const execute = async (turnTelemetryContext = config.telemetryContext): Promise<CompletedTurn> => {
+		const turnConfig = { ...config, telemetryContext: turnTelemetryContext, telemetryTurnId: turnId };
+		const message = await streamAssistantResponse(currentContext, turnConfig, signal, emit, streamFunction);
+		newMessages.push(message);
+
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			await emit({ type: "turn_end", message, toolResults: [] });
+			return { terminal: true };
+		}
+
+		const toolCalls = message.content.filter((content) => content.type === "toolCall");
+		const toolResults: ToolResultMessage[] = [];
+		let hasMoreToolCalls = false;
+		if (toolCalls.length > 0) {
+			const executedToolBatch =
+				message.stopReason === "length"
+					? await failToolCallsFromTruncatedMessage(toolCalls, emit, turnConfig)
+					: await executeToolCalls(currentContext, message, turnConfig, signal, emit);
+			toolResults.push(...executedToolBatch.messages);
+			hasMoreToolCalls = !executedToolBatch.terminate;
+			for (const result of toolResults) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
+			}
+		}
+
+		await emit({ type: "turn_end", message, toolResults });
+		return {
+			terminal: false,
+			hasMoreToolCalls,
+			context: { message, toolResults, context: currentContext, newMessages },
+		};
+	};
+
+	if (!config.telemetryContext || !operation || !turnId) return execute();
+	return startHarnessSpan(
+		config.telemetryContext,
+		"pi.harness.turn",
+		{
+			"pi.lane.name": operation.laneName,
+			"pi.operation.id": operation.operationId,
+			"pi.turn.id": turnId,
+		},
+		(span) => execute(span),
+	);
 }
 
 /**
@@ -298,10 +336,13 @@ async function streamAssistantResponse(
 			"pi.ai.api": config.model.api,
 			"pi.ai.streaming": true,
 			"pi.ai.deferred": config.deferred !== undefined && config.deferred !== false,
+			"pi.ai.purpose": "assistant",
 		},
 		async (span) => {
 			const startedAt = performance.now();
-			let firstChunkMs: number | undefined;
+			let firstEventMs: number | undefined;
+			let firstTextDeltaMs: number | undefined;
+			let httpStatus: number | undefined;
 			let chunkCount = 0;
 			const finalMessage = await streamAssistantResponseBody(
 				context,
@@ -310,9 +351,13 @@ async function streamAssistantResponse(
 				emit,
 				streamFunction,
 				span,
-				() => {
+				(eventType) => {
 					chunkCount++;
-					firstChunkMs ??= performance.now() - startedAt;
+					firstEventMs ??= performance.now() - startedAt;
+					if (eventType === "text_delta") firstTextDeltaMs ??= performance.now() - startedAt;
+				},
+				(status) => {
+					httpStatus = status;
 				},
 			);
 			span.setAttributes({
@@ -323,9 +368,22 @@ async function streamAssistantResponse(
 				"pi.ai.usage.output_tokens": finalMessage.usage.output,
 				"pi.ai.usage.cache_read_tokens": finalMessage.usage.cacheRead,
 				"pi.ai.usage.cache_write_tokens": finalMessage.usage.cacheWrite,
+				...(finalMessage.usage.cacheWrite1h === undefined
+					? {}
+					: { "pi.ai.usage.cache_write_1h_tokens": finalMessage.usage.cacheWrite1h }),
+				...(finalMessage.usage.reasoning === undefined
+					? {}
+					: { "pi.ai.usage.reasoning_tokens": finalMessage.usage.reasoning }),
 				"pi.ai.usage.total_tokens": finalMessage.usage.totalTokens,
 				"pi.ai.usage.cost": finalMessage.usage.cost.total,
-				...(firstChunkMs === undefined ? {} : { "pi.ai.stream.time_to_first_chunk_ms": firstChunkMs }),
+				...(httpStatus === undefined ? {} : { "pi.ai.http.status_code": httpStatus }),
+				...(firstEventMs === undefined ? {} : { "pi.ai.stream.time_to_first_event_ms": firstEventMs }),
+				...(firstTextDeltaMs === undefined
+					? {}
+					: {
+							"pi.ai.stream.time_to_first_text_delta_ms": firstTextDeltaMs,
+							"pi.ai.stream.text_timing_fidelity": "stream_delta_not_token" as const,
+						}),
 				"pi.ai.stream.chunk_count": chunkCount,
 				...(finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted"
 					? { "pi.ai.error.type": finalMessage.stopReason === "aborted" ? "aborted" : "provider_error" }
@@ -354,7 +412,8 @@ async function streamAssistantResponseBody(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 	requestTelemetryContext = config.telemetryContext,
-	onChunk?: () => void,
+	onChunk?: (eventType: string) => void,
+	onHttpResponse?: (status: number) => void,
 ): Promise<AssistantMessage> {
 	let messages = context.messages;
 	if (config.transformContext) {
@@ -374,13 +433,17 @@ async function streamAssistantResponseBody(
 		apiKey: resolvedApiKey,
 		signal,
 		telemetryContext: requestTelemetryContext,
+		onResponse: async (providerResponse, model) => {
+			onHttpResponse?.(providerResponse.status);
+			await config.onResponse?.(providerResponse, model);
+		},
 	});
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
 	for await (const event of response) {
-		onChunk?.();
+		onChunk?.(event.type);
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
@@ -447,6 +510,7 @@ async function streamAssistantResponseBody(
 async function failToolCallsFromTruncatedMessage(
 	toolCalls: AgentToolCall[],
 	emit: AgentEventSink,
+	config: AgentLoopConfig,
 ): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
 	for (const toolCall of toolCalls) {
@@ -463,6 +527,7 @@ async function failToolCallsFromTruncatedMessage(
 			),
 			isError: true,
 		};
+		await recordImmediateToolCall(finalized, config);
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emit);
@@ -515,25 +580,9 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
-		let finalized: FinalizedToolCallOutcome;
-		if (preparation.kind === "immediate") {
-			finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
-			};
-		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				config,
-				signal,
-			);
-		}
+		const scheduled = scheduleToolCall(currentContext, assistantMessage, toolCall, config, signal, emit);
+		if ((await scheduled.preparation) === "prepared") scheduled.release();
+		const finalized = await scheduled.result;
 
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
@@ -570,31 +619,18 @@ async function executeToolCallsParallel(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
-		if (preparation.kind === "immediate") {
-			const finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
-			} satisfies FinalizedToolCallOutcome;
+		const scheduled = scheduleToolCall(currentContext, assistantMessage, toolCall, config, signal, emit);
+		if ((await scheduled.preparation) === "immediate") {
+			const finalized = await scheduled.result;
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
-			if (signal?.aborted) {
-				break;
-			}
+			if (signal?.aborted) break;
 			continue;
 		}
 
 		finalizedCalls.push(async () => {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			const finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				config,
-				signal,
-			);
+			scheduled.release();
+			const finalized = await scheduled.result;
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
@@ -731,6 +767,119 @@ async function prepareToolCall(
 			isError: true,
 		};
 	}
+}
+
+function imageDataBytes(data: string): number {
+	const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+	return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+function toolResultSizeBytes(result: AgentToolResult<any>): number {
+	let bytes = 0;
+	for (const content of result.content ?? []) {
+		bytes +=
+			content.type === "text" ? new TextEncoder().encode(content.text).byteLength : imageDataBytes(content.data);
+	}
+	return bytes;
+}
+
+function toolStartAttributes(toolCall: AgentToolCall, config: AgentLoopConfig) {
+	const operation = config.telemetryOperation;
+	if (!operation) return undefined;
+	return {
+		"pi.lane.name": operation.laneName,
+		"pi.operation.id": operation.operationId,
+		...(config.telemetryTurnId ? { "pi.turn.id": config.telemetryTurnId } : {}),
+		"pi.tool.name": toolCall.name,
+		"pi.tool.call_id": toolCall.id,
+	};
+}
+
+async function recordImmediateToolCall(finalized: FinalizedToolCallOutcome, config: AgentLoopConfig): Promise<void> {
+	const attributes = toolStartAttributes(finalized.toolCall, config);
+	if (!config.telemetryContext || !attributes) return;
+	await startHarnessSpan(config.telemetryContext, "pi.harness.tool", attributes, (span) => {
+		span.setAttributes({
+			"pi.tool.is_error": finalized.isError,
+			"pi.tool.result_size_bytes": toolResultSizeBytes(finalized.result),
+			"pi.tool.outcome": finalized.isError ? "error" : "completed",
+		});
+		if (finalized.isError) span.setStatus({ status: "error" });
+	});
+}
+
+type ScheduledToolCall = {
+	preparation: Promise<"immediate" | "prepared">;
+	release(): void;
+	result: Promise<FinalizedToolCallOutcome>;
+};
+
+function scheduleToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): ScheduledToolCall {
+	let resolvePreparation = (_kind: "immediate" | "prepared") => {};
+	let rejectPreparation = (_error: unknown) => {};
+	const preparation = new Promise<"immediate" | "prepared">((resolve, reject) => {
+		resolvePreparation = resolve;
+		rejectPreparation = reject;
+	});
+	let release = () => {};
+	const executionGate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const execute = async (span?: HarnessTelemetrySpan<"pi.harness.tool">) => {
+		const preparationStartedAt = performance.now();
+		let prepared: PreparedToolCall | ImmediateToolCallOutcome;
+		try {
+			prepared = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		} catch (error) {
+			rejectPreparation(error);
+			throw error;
+		}
+		let activeDurationMs = performance.now() - preparationStartedAt;
+		let finalized: FinalizedToolCallOutcome;
+		if (prepared.kind === "immediate") {
+			resolvePreparation("immediate");
+			finalized = { toolCall, result: prepared.result, isError: prepared.isError };
+		} else {
+			resolvePreparation("prepared");
+			await executionGate;
+			const executionStartedAt = performance.now();
+			const executed = await executePreparedToolCall(prepared, signal, emit);
+			finalized = await finalizeExecutedToolCall(
+				currentContext,
+				assistantMessage,
+				prepared,
+				executed,
+				config,
+				signal,
+			);
+			activeDurationMs += performance.now() - executionStartedAt;
+		}
+		span?.setAttributes({
+			"pi.tool.is_error": finalized.isError,
+			"pi.tool.duration_ms": activeDurationMs,
+			"pi.tool.result_size_bytes": toolResultSizeBytes(finalized.result),
+			"pi.tool.outcome":
+				signal?.aborted && finalized.isError ? "aborted" : finalized.isError ? "error" : "completed",
+		});
+		if (finalized.isError) span?.setStatus({ status: "error" });
+		return finalized;
+	};
+	const attributes = toolStartAttributes(toolCall, config);
+	const result =
+		config.telemetryContext && attributes
+			? startHarnessSpan(config.telemetryContext, "pi.harness.tool", attributes, execute)
+			: execute();
+	void result.catch((error) => {
+		rejectPreparation(error);
+	});
+	return { preparation, release, result };
 }
 
 async function executePreparedToolCall(

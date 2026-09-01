@@ -19,6 +19,7 @@ import type {
 	AgentLoopTurnUpdate,
 	AgentMessage,
 	AgentState,
+	AgentTelemetryOperation,
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
@@ -122,6 +123,8 @@ export interface AgentOptions {
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
 	telemetryContext?: TelemetryContext;
+	/** Current admitted operation metadata for turn and tool spans. */
+	telemetryOperation?: AgentTelemetryOperation;
 }
 
 class PendingMessageQueue {
@@ -216,6 +219,8 @@ export class Agent {
 	public toolExecution: ToolExecutionMode;
 	/** Optional telemetry parent for agent and provider spans. */
 	public telemetryContext?: TelemetryContext;
+	/** Current admitted operation metadata for turn and tool spans. */
+	public telemetryOperation?: AgentTelemetryOperation;
 
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
@@ -240,6 +245,7 @@ export class Agent {
 		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
 		this.telemetryContext = runtimeOptions.telemetryContext;
+		this.telemetryOperation = runtimeOptions.telemetryOperation;
 	}
 
 	/**
@@ -461,6 +467,7 @@ export class Agent {
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
 			telemetryContext: this.telemetryContext,
+			telemetryOperation: this.telemetryOperation,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: shouldStopAfterTurn

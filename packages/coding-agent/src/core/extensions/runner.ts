@@ -2,8 +2,9 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { type AgentMessage, startHarnessSpan } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -298,6 +299,7 @@ export class ExtensionRunner {
 	private staleMessage: string | undefined;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
+	private readonly getTelemetryContext: () => TelemetryContext | undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -305,6 +307,7 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
+		getTelemetryContext: () => TelemetryContext | undefined = () => undefined,
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -312,6 +315,7 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.getTelemetryContext = getTelemetryContext;
 	}
 
 	bindCore(
@@ -599,6 +603,38 @@ export class ExtensionRunner {
 		}
 	}
 
+	private async invokeHandler<Result>(
+		extensionPath: string,
+		eventType: string,
+		handler: () => Result | Promise<Result>,
+	): Promise<Result> {
+		const telemetryContext = this.getTelemetryContext();
+		if (!telemetryContext) return handler();
+		const handlerName = extensionPath.startsWith("<")
+			? extensionPath
+			: (extensionPath.split(/[\\/]/).pop() ?? extensionPath);
+		return startHarnessSpan(
+			telemetryContext,
+			"pi.harness.event_handler",
+			{
+				"pi.event.type": eventType,
+				"pi.lane.name": "main",
+				"pi.event.handler": handlerName,
+			},
+			async (span) => {
+				try {
+					const result = await handler();
+					span.setAttributes({ "pi.event.outcome": "completed" });
+					return result;
+				} catch (error) {
+					span.setAttributes({ "pi.event.outcome": "failed" });
+					span.setStatus({ status: "error" });
+					throw error;
+				}
+			},
+		);
+	}
+
 	private assertActive(): void {
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);
@@ -858,7 +894,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.invokeHandler(ext.path, event.type, () => handler(event, ctx));
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
@@ -894,7 +930,9 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
-					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
+					const handlerResult = (await this.invokeHandler(ext.path, "message_end", () =>
+						handler(currentEvent, ctx),
+					)) as MessageEndEventResult | undefined;
 					if (!handlerResult?.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
@@ -935,7 +973,9 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					const handlerResult = (await this.invokeHandler(ext.path, "tool_result", () =>
+						handler(currentEvent, ctx),
+					)) as ToolResultEventResult | undefined;
 					if (!handlerResult) continue;
 
 					if (handlerResult.content !== undefined) {
@@ -988,7 +1028,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+				const handlerResult = await this.invokeHandler(ext.path, "tool_call", () => handler(event, ctx));
 
 				if (handlerResult) {
 					result = handlerResult as ToolCallEventResult;
@@ -1011,7 +1051,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.invokeHandler(ext.path, "user_bash", () => handler(event, ctx));
 					if (handlerResult) {
 						return handlerResult as UserBashEventResult;
 					}
@@ -1042,7 +1082,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.invokeHandler(ext.path, "context", () => handler(event, ctx));
 
 					if (handlerResult && (handlerResult as ContextEventResult).messages) {
 						currentMessages = (handlerResult as ContextEventResult).messages!;
@@ -1077,7 +1117,9 @@ export class ExtensionRunner {
 						type: "before_provider_request",
 						payload: currentPayload,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.invokeHandler(ext.path, "before_provider_request", () =>
+						handler(event, ctx),
+					);
 					if (handlerResult !== undefined) {
 						currentPayload = handlerResult;
 					}
@@ -1111,7 +1153,7 @@ export class ExtensionRunner {
 						type: "before_provider_headers",
 						headers,
 					};
-					await handler(event, ctx);
+					await this.invokeHandler(ext.path, "before_provider_headers", () => handler(event, ctx));
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
@@ -1159,7 +1201,9 @@ export class ExtensionRunner {
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.invokeHandler(ext.path, "before_agent_start", () =>
+						handler(event, ctx),
+					);
 
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
@@ -1214,7 +1258,9 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await this.invokeHandler(ext.path, "resources_discover", () =>
+						handler(event, ctx),
+					);
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 					if (result?.skillPaths?.length) {
@@ -1263,7 +1309,9 @@ export class ExtensionRunner {
 						source,
 						streamingBehavior,
 					};
-					const result = (await handler(event, ctx)) as InputEventResult | undefined;
+					const result = (await this.invokeHandler(ext.path, "input", () => handler(event, ctx))) as
+						| InputEventResult
+						| undefined;
 					if (result?.action === "handled") return result;
 					if (result?.action === "transform") {
 						currentText = result.text;

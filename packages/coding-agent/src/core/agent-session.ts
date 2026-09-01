@@ -679,24 +679,46 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
-			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+			const persist = () => {
+				if (event.message.role === "custom") {
+					this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
+				} else if (
+					event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult"
+				) {
+					this.sessionManager.appendMessage(event.message);
+				}
+			};
+			const telemetryContext = this.agent.telemetryContext;
+			if (
+				telemetryContext &&
+				(event.message.role === "custom" ||
+					event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult")
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				await startHarnessSpan(
+					telemetryContext,
+					"pi.session.write",
+					{
+						"pi.lane.name": "main",
+						...(this.agent.telemetryOperation
+							? { "pi.operation.id": this.agent.telemetryOperation.operationId }
+							: {}),
+						"pi.session.mutation": "entry",
+						"pi.session.item_type": event.message.role,
+					},
+					persist,
+				);
+			} else {
+				persist();
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
@@ -1146,9 +1168,8 @@ export class AgentSession {
 			},
 			async (span) => {
 				const previousTelemetryContext = this.agent.telemetryContext;
-				this.agent.telemetryContext = span;
 				try {
-					await this._runAgentPromptBody(messages);
+					await this._runAgentPromptBody(messages, operationId, span);
 					const finalMessage = [...this.agent.state.messages]
 						.reverse()
 						.find((message): message is AssistantMessage => message.role === "assistant");
@@ -1174,18 +1195,68 @@ export class AgentSession {
 					throw error;
 				} finally {
 					this.agent.telemetryContext = previousTelemetryContext;
+					this.agent.telemetryOperation = undefined;
 				}
 			},
 		);
 	}
 
-	private async _runAgentPromptBody(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	private async _runAgentPromptBody(
+		messages: AgentMessage | AgentMessage[],
+		operationId?: string,
+		telemetryContext?: TelemetryContext,
+	): Promise<void> {
 		this._isAgentRunActive = true;
 		try {
-			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
-				await this.agent.continue();
-			}
+			let attempt = 1;
+			let first = true;
+			let shouldContinue: boolean;
+			do {
+				let attemptMessage: AssistantMessage | undefined;
+				const execute = async (stepTelemetryContext = telemetryContext) => {
+					if (operationId) {
+						this.agent.telemetryContext = stepTelemetryContext;
+						this.agent.telemetryOperation = { laneName: "main", operationId, stepAttempt: attempt };
+					} else if (stepTelemetryContext) {
+						this.agent.telemetryContext = stepTelemetryContext;
+					}
+					if (first) await this.agent.prompt(messages);
+					else await this.agent.continue();
+					first = false;
+					attemptMessage = this._lastAssistantMessage;
+					shouldContinue = await this._handlePostAgentRun();
+				};
+				if (telemetryContext && operationId) {
+					await startHarnessSpan(
+						telemetryContext,
+						"pi.harness.step",
+						{
+							"pi.lane.name": "main",
+							"pi.operation.id": operationId,
+							"pi.step.kind": "assistant",
+							"pi.step.attempt": attempt,
+						},
+						async (span) => {
+							await execute(span);
+							const outcome =
+								attemptMessage?.stopReason === "aborted"
+									? "aborted"
+									: attemptMessage?.stopReason === "error"
+										? shouldContinue
+											? "retry"
+											: "failed"
+										: "succeeded";
+							span.setAttributes({ "pi.step.outcome": outcome });
+							if (outcome === "retry" || outcome === "failed" || outcome === "aborted") {
+								span.setStatus({ status: "error" });
+							}
+						},
+					);
+				} else {
+					await execute();
+				}
+				attempt++;
+			} while (shouldContinue!);
 		} finally {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
@@ -1982,19 +2053,46 @@ export class AgentSession {
 		env: Record<string, string> | undefined,
 		reason: "manual" | "threshold" | "overflow",
 	): Promise<CompactionResult> {
-		return compact(
-			preparation,
-			requestModel,
-			apiKey,
-			headers,
-			customInstructions,
-			signal,
-			this.thinkingLevel,
-			this.agent.streamFunction,
-			env,
-			this.settingsManager.getRetrySettings(),
-			this._summarizationRetryCallbacks({ source: "compaction", reason }),
-			undefined, // sessionId
+		const execute = (telemetryContext?: TelemetryContext) =>
+			compact(
+				preparation,
+				requestModel,
+				apiKey,
+				headers,
+				customInstructions,
+				signal,
+				this.thinkingLevel,
+				this.agent.streamFunction,
+				env,
+				this.settingsManager.getRetrySettings(),
+				this._summarizationRetryCallbacks({ source: "compaction", reason }),
+				undefined,
+				telemetryContext,
+			);
+		const operation = this.agent.telemetryOperation;
+		const telemetryContext = this.agent.telemetryContext;
+		if (!operation || !telemetryContext) return execute();
+		return startHarnessSpan(
+			telemetryContext,
+			"pi.harness.step",
+			{
+				"pi.lane.name": operation.laneName,
+				"pi.operation.id": operation.operationId,
+				"pi.step.kind": "compaction",
+				"pi.step.attempt": 1,
+				"pi.compaction.reason": reason,
+			},
+			async (span) => {
+				try {
+					const result = await execute(span);
+					span.setAttributes({ "pi.step.outcome": "succeeded" });
+					return result;
+				} catch (error) {
+					span.setAttributes({ "pi.step.outcome": signal.aborted ? "aborted" : "failed" });
+					span.setStatus({ status: "error" });
+					throw error;
+				}
+			},
 		);
 	}
 
@@ -2015,6 +2113,42 @@ export class AgentSession {
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
+		if (!this._telemetryContext) return this._compactBody(customInstructions);
+		const operationId = randomUUID();
+		return startHarnessSpan(
+			this._telemetryContext,
+			"pi.harness.compaction",
+			{
+				"pi.session.id": this.sessionId,
+				"pi.lane.name": "main",
+				"pi.operation.id": operationId,
+				"pi.operation.recovery": false,
+				"pi.operation.kind": "compaction",
+			},
+			async (span) => {
+				const previousContext = this.agent.telemetryContext;
+				const previousOperation = this.agent.telemetryOperation;
+				this.agent.telemetryContext = span;
+				this.agent.telemetryOperation = { laneName: "main", operationId, stepAttempt: 1 };
+				try {
+					const result = await this._compactBody(customInstructions);
+					span.setAttributes({ "pi.operation.outcome": "completed" });
+					return result;
+				} catch (error) {
+					const aborted =
+						error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
+					span.setAttributes({ "pi.operation.outcome": aborted ? "aborted" : "failed" });
+					span.setStatus({ status: "error" });
+					throw error;
+				} finally {
+					this.agent.telemetryContext = previousContext;
+					this.agent.telemetryOperation = previousOperation;
+				}
+			},
+		);
+	}
+
+	private async _compactBody(customInstructions?: string): Promise<CompactionResult> {
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
@@ -2868,6 +3002,7 @@ export class AgentSession {
 			this._cwd,
 			this.sessionManager,
 			new ModelRegistry(this._modelRuntime),
+			() => this.agent.telemetryContext ?? this._telemetryContext,
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
@@ -2993,8 +3128,32 @@ export class AgentSession {
 
 		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
+		const retrySignal = this._retryAbortController.signal;
 		try {
-			await sleep(delayMs, this._retryAbortController.signal);
+			const operation = this.agent.telemetryOperation;
+			const telemetryContext = this.agent.telemetryContext;
+			if (operation && telemetryContext) {
+				await startHarnessSpan(
+					telemetryContext,
+					"pi.harness.sleep",
+					{
+						"pi.operation.id": operation.operationId,
+						"pi.sleep.delay_ms": delayMs,
+					},
+					async (span) => {
+						try {
+							await sleep(delayMs, retrySignal);
+							span.setAttributes({ "pi.sleep.outcome": "elapsed" });
+						} catch (error) {
+							span.setAttributes({ "pi.sleep.outcome": "aborted" });
+							span.setStatus({ status: "error" });
+							throw error;
+						}
+					},
+				);
+			} else {
+				await sleep(delayMs, retrySignal);
+			}
 		} catch {
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
@@ -3184,6 +3343,46 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		if (!this._telemetryContext) return this._navigateTreeBody(targetId, options);
+		const operationId = randomUUID();
+		return startHarnessSpan(
+			this._telemetryContext,
+			"pi.harness.navigation",
+			{
+				"pi.session.id": this.sessionId,
+				"pi.lane.name": "main",
+				"pi.operation.id": operationId,
+				"pi.operation.recovery": false,
+				"pi.operation.kind": "navigation",
+			},
+			async (span) => {
+				const previousContext = this.agent.telemetryContext;
+				const previousOperation = this.agent.telemetryOperation;
+				this.agent.telemetryContext = span;
+				this.agent.telemetryOperation = { laneName: "main", operationId, stepAttempt: 1 };
+				try {
+					const result = await this._navigateTreeBody(targetId, options);
+					span.setAttributes({
+						"pi.operation.outcome": result.cancelled ? (result.aborted ? "aborted" : "declined") : "completed",
+					});
+					if (result.aborted) span.setStatus({ status: "error" });
+					return result;
+				} catch (error) {
+					span.setAttributes({ "pi.operation.outcome": "failed" });
+					span.setStatus({ status: "error" });
+					throw error;
+				} finally {
+					this.agent.telemetryContext = previousContext;
+					this.agent.telemetryOperation = previousOperation;
+				}
+			},
+		);
+	}
+
+	private async _navigateTreeBody(
+		targetId: string,
+		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
+	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
 		}
@@ -3272,19 +3471,44 @@ export class AgentSession {
 				const model = this.model!;
 				const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
-					model: requestModel,
-					apiKey,
-					headers,
-					env,
-					signal: this._branchSummaryAbortController.signal,
-					customInstructions,
-					replaceInstructions,
-					reserveTokens: branchSummarySettings.reserveTokens,
-					streamFn: this.agent.streamFunction,
-					retry: this.settingsManager.getRetrySettings(),
-					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
-				});
+				const branchSummarySignal = this._branchSummaryAbortController.signal;
+				const summarize = (telemetryContext = this.agent.telemetryContext) =>
+					generateBranchSummary(entriesToSummarize, {
+						model: requestModel,
+						apiKey,
+						headers,
+						env,
+						signal: branchSummarySignal,
+						customInstructions,
+						replaceInstructions,
+						reserveTokens: branchSummarySettings.reserveTokens,
+						streamFn: this.agent.streamFunction,
+						retry: this.settingsManager.getRetrySettings(),
+						callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
+						telemetryContext,
+					});
+				const operation = this.agent.telemetryOperation;
+				const telemetryContext = this.agent.telemetryContext;
+				const result =
+					operation && telemetryContext
+						? await startHarnessSpan(
+								telemetryContext,
+								"pi.harness.step",
+								{
+									"pi.lane.name": operation.laneName,
+									"pi.operation.id": operation.operationId,
+									"pi.step.kind": "branch_summary",
+									"pi.step.attempt": 1,
+								},
+								async (span) => {
+									const summary = await summarize(span);
+									const outcome = summary.aborted ? "aborted" : summary.error ? "failed" : "succeeded";
+									span.setAttributes({ "pi.step.outcome": outcome });
+									if (outcome !== "succeeded") span.setStatus({ status: "error" });
+									return summary;
+								},
+							)
+						: await summarize();
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };
 				}

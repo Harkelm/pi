@@ -146,8 +146,18 @@ export interface AgentLoopTurnUpdate {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+export interface AgentTelemetryOperation {
+	laneName: string;
+	operationId: string;
+	stepAttempt: number;
+}
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+	/** Current coding-runtime operation metadata used to parent turn and tool telemetry. */
+	telemetryOperation?: AgentTelemetryOperation;
+	/** Invocation-local turn identity assigned by the loop. */
+	telemetryTurnId?: string;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.

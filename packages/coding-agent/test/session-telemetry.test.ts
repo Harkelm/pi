@@ -60,7 +60,7 @@ describe("session telemetry", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("parents AI and provider spans under a real session run", async () => {
+	it("records the real run, step, turn, request, provider, and session-write hierarchy", async () => {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		await authStorage.modify(MODEL.provider, async () => ({ type: "api_key", key: "test-api-key" }));
 		const registry = await createModelRegistry(authStorage, join(agentDir, "models.json"));
@@ -92,15 +92,27 @@ describe("session telemetry", () => {
 			await session.prompt("private prompt");
 			const spans = telemetryContext.getSpans();
 			const run = spans.find((span) => span.name === "pi.harness.run");
+			const step = spans.find((span) => span.name === "pi.harness.step");
+			const turn = spans.find((span) => span.name === "pi.harness.turn");
 			const request = spans.find((span) => span.name === "pi.ai.request");
 			const provider = spans.find((span) => span.name === "provider.transport");
+			const writes = spans.filter((span) => span.name === "pi.session.write");
 			expect(run?.attributes).toMatchObject({
 				"pi.session.id": "session-test",
 				"pi.operation.kind": "run",
 				"pi.operation.outcome": "completed",
 			});
-			expect(request?.parentId).toBe(run?.id);
+			expect(step?.parentId).toBe(run?.id);
+			expect(step?.attributes).toMatchObject({
+				"pi.step.kind": "assistant",
+				"pi.step.attempt": 1,
+				"pi.step.outcome": "succeeded",
+			});
+			expect(turn?.parentId).toBe(step?.id);
+			expect(request?.parentId).toBe(turn?.id);
 			expect(provider?.parentId).toBe(request?.id);
+			expect(writes.length).toBeGreaterThanOrEqual(2);
+			expect(writes.every((write) => write.parentId === step?.id)).toBe(true);
 			expect(JSON.stringify(spans)).not.toContain("private prompt");
 			expect(JSON.stringify(spans)).not.toContain("private response");
 		} finally {

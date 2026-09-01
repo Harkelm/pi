@@ -24,6 +24,8 @@ One logical request to an AI provider
 | `pi.ai.api` | `string` | yes |  |  | Provider API id |
 | `pi.ai.streaming` | `boolean` | yes |  |  | Whether this operation returns a stream |
 | `pi.ai.deferred` | `boolean` | no |  |  | Whether the operation requests or participates in deferred execution |
+| `pi.ai.purpose` | `string` | no | assistant, compaction, branch_summary |  | Runtime purpose for the request |
+| `pi.ai.attempt` | `number` | no |  |  | One-based request attempt within retrying structural work |
 
 #### End attributes
 
@@ -39,12 +41,70 @@ All end attributes are optional completion enrichment.
 | `pi.ai.usage.output_tokens` | `number` |  |  | Reported output tokens |
 | `pi.ai.usage.cache_read_tokens` | `number` |  |  | Reported cache-read tokens |
 | `pi.ai.usage.cache_write_tokens` | `number` |  |  | Reported cache-write tokens |
+| `pi.ai.usage.cache_write_1h_tokens` | `number` |  |  | Reported one-hour cache-write tokens |
 | `pi.ai.usage.reasoning_tokens` | `number` |  |  | Reported reasoning tokens |
 | `pi.ai.usage.total_tokens` | `number` |  |  | Reported total tokens |
 | `pi.ai.usage.cost` | `number` |  |  | Reported total cost |
-| `pi.ai.stream.chunk_count` | `number` |  |  | Streamed update chunk count |
-| `pi.ai.stream.time_to_first_chunk_ms` | `number` |  |  | Elapsed milliseconds to first update chunk |
+| `pi.ai.stream.chunk_count` | `number` |  |  | Consumed stream event count |
+| `pi.ai.stream.time_to_first_event_ms` | `number` |  |  | Elapsed milliseconds to the first stream event of any kind |
+| `pi.ai.stream.time_to_first_text_delta_ms` | `number` |  |  | Elapsed milliseconds to the first provider text-delta event; not token timing |
+| `pi.ai.stream.text_timing_fidelity` | `string` | stream_delta_not_token |  | Honest timing fidelity for text deltas |
 | `pi.ai.error.type` | `string` |  | low cardinality | Provider or transport error class |
+
+#### Events
+
+No declared span events.
+
+### `pi.ai.provider_attempt`
+
+One observable provider transport attempt
+
+- Parents: `pi.ai.request`
+- Default status: `ok`
+- Error when: The transport attempt throws
+
+#### Start attributes
+
+| Name | Type | Required | Values | Notes | Description |
+|---|---|---:|---|---|---|
+| `pi.ai.provider_attempt` | `number` | yes |  |  | One-based attempt number |
+| `pi.ai.provider_retry` | `boolean` | yes |  |  | Whether this is a retry |
+
+#### End attributes
+
+All end attributes are optional completion enrichment.
+
+| Name | Type | Values | Notes | Description |
+|---|---|---|---|---|
+| `pi.ai.provider_outcome` | `string` | completed, failed, aborted |  | Attempt outcome |
+| `pi.ai.http.status_code` | `number` |  |  | Observed failure status |
+
+#### Events
+
+No declared span events.
+
+### `pi.ai.retry_sleep`
+
+One provider retry backoff
+
+- Parents: `pi.ai.request`
+- Default status: `ok`
+- Error when: The backoff is aborted
+
+#### Start attributes
+
+| Name | Type | Required | Values | Notes | Description |
+|---|---|---:|---|---|---|
+| `pi.ai.retry.delay_ms` | `number` | yes |  |  | Requested delay |
+| `pi.ai.retry.next_attempt` | `number` | yes |  |  | Next one-based attempt |
+
+#### End attributes
+
+All end attributes are optional completion enrichment.
+
+| Name | Type | Values | Notes | Description |
+|---|---|---|---|---|
+| `pi.ai.retry.outcome` | `string` | elapsed, aborted |  | Backoff outcome |
 
 #### Events
 
@@ -182,7 +242,7 @@ No declared span events.
 
 One assistant response and its tool batch
 
-- Parents: `pi.harness.run`
+- Parents: `pi.harness.step`
 - Default status: `ok`
 - Error when: Turn work throws
 
@@ -208,9 +268,9 @@ No declared span events.
 
 ### `pi.harness.step`
 
-One durable retry attempt
+One runtime retry attempt around assistant or summarization work
 
-- Parents: `pi.harness.turn`, `pi.harness.checkpoint`, `pi.harness.compaction`, `pi.harness.navigation`
+- Parents: `pi.harness.run`, `pi.harness.compaction`, `pi.harness.navigation`, `pi.harness.step`
 - Default status: `ok`
 - Error when: The attempt retries, fails, or throws
 
@@ -238,11 +298,11 @@ No declared span events.
 
 ### `pi.harness.tool`
 
-One raw phase-2 tool execution
+One tool preparation and execution lifecycle
 
 - Parents: `pi.harness.turn`, `pi.harness.run`
 - Default status: `ok`
-- Error when: Raw phase-2 execution returns an error
+- Error when: The final tool result is an error or the call is aborted
 
 #### Start attributes
 
@@ -253,8 +313,8 @@ One raw phase-2 tool execution
 | `pi.turn.id` | `string` | no |  | high cardinality | Invocation-local live turn id |
 | `pi.tool.name` | `string` | yes |  |  | Tool name |
 | `pi.tool.call_id` | `string` | yes |  | high cardinality | Tool call id |
-| `pi.tool.replay` | `string` | yes | never, safe |  | Declared replay policy |
-| `pi.tool.recovery` | `boolean` | yes |  |  | Whether this is recovery execution |
+| `pi.tool.replay` | `string` | no | never, safe |  | Declared replay policy |
+| `pi.tool.recovery` | `boolean` | no |  |  | Whether this is recovery execution |
 
 #### End attributes
 
@@ -262,7 +322,10 @@ All end attributes are optional completion enrichment.
 
 | Name | Type | Values | Notes | Description |
 |---|---|---|---|---|
-| `pi.tool.is_error` | `boolean` |  |  | Whether raw phase-2 execution returned an error |
+| `pi.tool.is_error` | `boolean` |  |  | Whether the final tool result is an error |
+| `pi.tool.duration_ms` | `number` |  |  | Observed active preparation, execution, and result-finalization duration; excludes scheduler wait |
+| `pi.tool.result_size_bytes` | `number` |  |  | Exact byte size of model-visible text and decoded image data |
+| `pi.tool.outcome` | `string` | completed, error, aborted |  | Final tool lifecycle outcome |
 
 #### Events
 
@@ -336,7 +399,8 @@ One passive event listener invocation
 
 | Name | Type | Required | Values | Notes | Description |
 |---|---|---:|---|---|---|
-| `pi.event.type` | `string` | yes | run_start, run_resume, run_suspend, run_abort, run_end, fault, handler_error, turn_start, turn_end, retry_scheduled, retry_start, retry_end, message_start, message_update, message_end, tool_start, tool_update, tool_end, entry_added, write_pending, queue_update, fact_update, config_update, compaction_start, compaction_end, navigation_start, navigation_end, lane_created, usage | low cardinality | Delivered harness event type |
+| `pi.event.type` | `string` | yes |  | low cardinality | Delivered runtime event type |
+| `pi.event.handler` | `string` | no |  | high cardinality | Content-free extension handler identity |
 | `pi.lane.name` | `string` | no |  | high cardinality | Lane name for lane-scoped events |
 
 #### End attributes
@@ -345,7 +409,7 @@ All end attributes are optional completion enrichment.
 
 | Name | Type | Values | Notes | Description |
 |---|---|---|---|---|
-| _none_ | | | | |
+| `pi.event.outcome` | `string` | completed, failed |  | Handler invocation outcome |
 
 #### Events
 

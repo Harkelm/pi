@@ -1,9 +1,12 @@
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
+
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
 interface ProviderRetryOptions {
 	maxRetries?: number;
 	maxRetryDelayMs?: number;
 	signal?: AbortSignal;
+	telemetryContext?: TelemetryContext;
 }
 
 interface ProviderError extends Error {
@@ -110,16 +113,62 @@ export async function retryProviderRequest<T>(
 	let retriesRemaining = maxRetries;
 
 	for (;;) {
+		const attempt = maxRetries - retriesRemaining + 1;
 		try {
 			// Each retry is a fresh SDK request, so X-Stainless-Retry-Count remains zero.
-			return await request();
+			if (!options.telemetryContext) return await request();
+			return await options.telemetryContext.startSpan(
+				{
+					name: "pi.ai.provider_attempt",
+					attributes: {
+						"pi.ai.provider_attempt": attempt,
+						"pi.ai.provider_retry": attempt > 1,
+					},
+				},
+				async (span) => {
+					try {
+						const result = await request();
+						span.setAttributes({ "pi.ai.provider_outcome": "completed" });
+						return result;
+					} catch (error) {
+						span.setAttributes({
+							"pi.ai.provider_outcome": options.signal?.aborted ? "aborted" : "failed",
+							...(isProviderError(error) && error.status !== undefined
+								? { "pi.ai.http.status_code": error.status }
+								: {}),
+						});
+						span.setStatus({ status: "error" });
+						throw error;
+					}
+				},
+			);
 		} catch (error) {
 			if (options.signal?.aborted) throw createAbortError();
 			if (retriesRemaining <= 0 || !isProviderError(error) || !isRetryableProviderError(error)) throw error;
 
 			const retryIndex = maxRetries - retriesRemaining;
 			retriesRemaining--;
-			await abortableSleep(getRetryDelayMs(error, retryIndex, options.maxRetryDelayMs), options.signal);
+			const delayMs = getRetryDelayMs(error, retryIndex, options.maxRetryDelayMs);
+			if (options.telemetryContext) {
+				await options.telemetryContext.startSpan(
+					{
+						name: "pi.ai.retry_sleep",
+						attributes: { "pi.ai.retry.delay_ms": delayMs, "pi.ai.retry.next_attempt": attempt + 1 },
+					},
+					async (span) => {
+						try {
+							await abortableSleep(delayMs, options.signal);
+							span.setAttributes({ "pi.ai.retry.outcome": "elapsed" });
+						} catch (sleepError) {
+							span.setAttributes({ "pi.ai.retry.outcome": "aborted" });
+							span.setStatus({ status: "error" });
+							throw sleepError;
+						}
+					},
+				);
+			} else {
+				await abortableSleep(delayMs, options.signal);
+			}
 		}
 	}
 }
