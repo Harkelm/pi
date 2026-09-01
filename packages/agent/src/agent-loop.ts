@@ -629,7 +629,11 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
-			scheduled.release();
+			if (signal?.aborted) {
+				scheduled.abort();
+			} else {
+				scheduled.release();
+			}
 			const finalized = await scheduled.result;
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
@@ -811,6 +815,7 @@ async function recordImmediateToolCall(finalized: FinalizedToolCallOutcome, conf
 type ScheduledToolCall = {
 	preparation: Promise<"immediate" | "prepared">;
 	release(): void;
+	abort(): void;
 	result: Promise<FinalizedToolCallOutcome>;
 };
 
@@ -829,8 +834,10 @@ function scheduleToolCall(
 		rejectPreparation = reject;
 	});
 	let release = () => {};
-	const executionGate = new Promise<void>((resolve) => {
-		release = resolve;
+	let abort = () => {};
+	const executionGate = new Promise<boolean>((resolve) => {
+		release = () => resolve(true);
+		abort = () => resolve(false);
 	});
 	const execute = async (span?: HarnessTelemetrySpan<"pi.harness.tool">) => {
 		const preparationStartedAt = performance.now();
@@ -848,18 +855,21 @@ function scheduleToolCall(
 			finalized = { toolCall, result: prepared.result, isError: prepared.isError };
 		} else {
 			resolvePreparation("prepared");
-			await executionGate;
-			const executionStartedAt = performance.now();
-			const executed = await executePreparedToolCall(prepared, signal, emit);
-			finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				prepared,
-				executed,
-				config,
-				signal,
-			);
-			activeDurationMs += performance.now() - executionStartedAt;
+			if (await executionGate) {
+				const executionStartedAt = performance.now();
+				const executed = await executePreparedToolCall(prepared, signal, emit);
+				finalized = await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					prepared,
+					executed,
+					config,
+					signal,
+				);
+				activeDurationMs += performance.now() - executionStartedAt;
+			} else {
+				finalized = { toolCall, result: createErrorToolResult("Operation aborted"), isError: true };
+			}
 		}
 		span?.setAttributes({
 			"pi.tool.is_error": finalized.isError,
@@ -879,7 +889,7 @@ function scheduleToolCall(
 	void result.catch((error) => {
 		rejectPreparation(error);
 	});
-	return { preparation, release, result };
+	return { preparation, release, abort, result };
 }
 
 async function executePreparedToolCall(
