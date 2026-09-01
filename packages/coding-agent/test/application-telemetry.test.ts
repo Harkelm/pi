@@ -1,3 +1,5 @@
+import { InMemoryTelemetryContext, type TelemetryContext } from "@earendil-works/pi-telemetry";
+import type { OpenTelemetryRuntime } from "@earendil-works/pi-telemetry-otel";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApplicationTelemetry, shutdownApplicationTelemetry } from "../src/core/application-telemetry.ts";
 
@@ -21,5 +23,48 @@ describe("application telemetry", () => {
 		} finally {
 			await shutdownApplicationTelemetry(runtime);
 		}
+	});
+
+	it("keeps recording and Collector shutdown failures non-blocking", async () => {
+		let shutdownCalled = false;
+		const telemetryContext: TelemetryContext = {
+			startSpan: <Result>(): Promise<Result> => Promise.reject(new Error("recording unavailable")),
+		};
+		const runtime = {
+			telemetryContext,
+			contextForSession: () => telemetryContext,
+			forceFlush: async () => {},
+			shutdown: async () => {
+				shutdownCalled = true;
+				throw new Error("Collector unavailable");
+			},
+		} satisfies OpenTelemetryRuntime;
+
+		await expect(shutdownApplicationTelemetry(runtime)).resolves.toBeUndefined();
+		expect(shutdownCalled).toBe(true);
+	});
+
+	it("records shutdown before closing the exporter", async () => {
+		const telemetryContext = new InMemoryTelemetryContext();
+		let shutdownCalled = false;
+		const runtime = {
+			telemetryContext,
+			contextForSession: () => telemetryContext,
+			forceFlush: async () => {},
+			shutdown: async () => {
+				shutdownCalled = true;
+			},
+		} satisfies OpenTelemetryRuntime;
+
+		await shutdownApplicationTelemetry(runtime);
+
+		expect(shutdownCalled).toBe(true);
+		expect(telemetryContext.getSpans()).toEqual([
+			expect.objectContaining({
+				name: "pi.process.shutdown",
+				attributes: { "pi.process.shutdown.reason": "cli_exit" },
+				settled: true,
+			}),
+		]);
 	});
 });

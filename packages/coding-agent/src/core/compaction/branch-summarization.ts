@@ -9,6 +9,7 @@ import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { RetryCallbacks, RetryPolicy } from "@earendil-works/pi-ai";
 import { contentText } from "@earendil-works/pi-ai";
 import type { Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -92,6 +93,8 @@ export interface GenerateBranchSummaryOptions {
 	retry?: RetryPolicy;
 	/** Optional callbacks for retry reporting (e.g. TUI retry indicators). */
 	callbacks?: RetryCallbacks;
+	/** Parent for branch-summary request attempts. */
+	telemetryContext?: TelemetryContext;
 }
 
 // ============================================================================
@@ -319,6 +322,7 @@ export async function generateBranchSummary(
 		streamFn,
 		retry,
 		callbacks,
+		telemetryContext,
 	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
@@ -360,8 +364,17 @@ export async function generateBranchSummary(
 	// without running through agent state/events. Retried via completeSummarization
 	// so transient stream drops reuse the configured retry policy.
 	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: 2048 };
-	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
+	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: 2048, telemetryContext };
+	const response = await completeSummarization(
+		model,
+		context,
+		requestOptions,
+		streamFn,
+		retry,
+		callbacks,
+		telemetryContext,
+		"branch_summary",
+	);
 
 	// Check if aborted or errored
 	if (response.stopReason === "aborted") {

@@ -1,5 +1,6 @@
 // Core session management
 
+export { getActiveW3CTraceContext, type W3CTraceContext } from "@earendil-works/pi-telemetry-otel";
 export { type Args, parseArgs } from "./cli/args.ts";
 
 // Config paths
@@ -23,6 +24,13 @@ export {
 	parseSkillBlock,
 	type SessionStats,
 } from "./core/agent-session.ts";
+export {
+	PI_OTEL_PARENT_PROCESS_PID_ENV,
+	PI_OTEL_PARENT_SESSION_ID_ENV,
+	PI_OTEL_PARENT_TRACEPARENT_ENV,
+	PI_OTEL_PARENT_TRACESTATE_ENV,
+	PI_OTEL_SUBAGENT_ID_ENV,
+} from "./core/application-telemetry.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
 // Compaction
 export {

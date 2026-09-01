@@ -1,5 +1,11 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
+import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import {
+	type AssistantMessage,
+	type Context,
+	createAssistantMessageEventStream,
+	type Model,
+} from "@earendil-works/pi-ai";
+import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CompactionPreparation,
@@ -168,6 +174,64 @@ describe("generateSummary reasoning options", () => {
 			cacheRetention: "none",
 			toolChoice: "auto",
 		});
+	});
+
+	it("records each compaction retry request under the compaction step", async () => {
+		const telemetryContext = new InMemoryTelemetryContext();
+		let callCount = 0;
+		const streamFn: StreamFn = (_model, _context, options) => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				void options?.telemetryContext?.startSpan({ name: "provider.transport" }, () => {
+					callCount++;
+					if (callCount === 1) {
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: {
+								...mockSummaryResponse,
+								stopReason: "error",
+								errorMessage: "private transient terminated",
+							},
+						});
+					} else {
+						stream.push({ type: "done", reason: "stop", message: mockSummaryResponse });
+					}
+				});
+			});
+			return stream;
+		};
+
+		await telemetryContext.startSpan({ name: "pi.harness.compaction" }, async (operation) => {
+			await operation.startSpan({ name: "pi.harness.step" }, async (step) => {
+				await completeSummarization(
+					createModel(false),
+					{ systemPrompt: "private system prompt", messages: [] },
+					{},
+					streamFn,
+					{ enabled: true, maxRetries: 1, baseDelayMs: 0 },
+					undefined,
+					step,
+					"compaction",
+				);
+			});
+		});
+
+		const spans = telemetryContext.getSpans();
+		const operation = spans.find((span) => span.name === "pi.harness.compaction");
+		const step = spans.find((span) => span.name === "pi.harness.step");
+		const requests = spans.filter((span) => span.name === "pi.ai.request");
+		const providers = spans.filter((span) => span.name === "provider.transport");
+		expect(step?.parentId).toBe(operation?.id);
+		expect(requests.map((span) => span.attributes)).toEqual([
+			expect.objectContaining({ "pi.ai.purpose": "compaction", "pi.ai.attempt": 1 }),
+			expect.objectContaining({ "pi.ai.purpose": "compaction", "pi.ai.attempt": 2 }),
+		]);
+		expect(requests.every((request) => request.parentId === step?.id)).toBe(true);
+		expect(providers.map((provider) => provider.parentId)).toEqual(requests.map((request) => request.id));
+		expect(requests[0]?.status.status).toBe("error");
+		expect(requests[1]?.status.status).toBe("ok");
+		expect(JSON.stringify(spans)).not.toContain("private");
 	});
 
 	it("preserves the standalone split-turn summary prompt", async () => {

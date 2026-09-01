@@ -1,6 +1,7 @@
+import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Context, Model, StreamOptions } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
 	requestOptions: [] as unknown[],
@@ -66,7 +67,7 @@ const context: Context = {
 	tools: [],
 };
 
-async function consume(options?: { maxRetries?: number; maxRetryDelayMs?: number }) {
+async function consume(options?: Pick<StreamOptions, "maxRetries" | "maxRetryDelayMs" | "telemetryContext">) {
 	const stream = streamOpenAICompletions(model, context, { apiKey: "test", ...options });
 	for await (const _event of stream) {
 		void _event;
@@ -102,7 +103,10 @@ describe("openai-completions provider retries", () => {
 			}),
 		];
 
-		const result = consume({ maxRetries: 2, maxRetryDelayMs: 100 });
+		const telemetryContext = new InMemoryTelemetryContext();
+		const result = telemetryContext.startSpan({ name: "pi.ai.request" }, (request) =>
+			consume({ maxRetries: 2, maxRetryDelayMs: 100, telemetryContext: request }),
+		);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(mockState.requestOptions).toHaveLength(1);
 		await vi.advanceTimersByTimeAsync(99);
@@ -119,6 +123,17 @@ describe("openai-completions provider retries", () => {
 			expect.objectContaining({ maxRetries: 0 }),
 			expect.objectContaining({ maxRetries: 0 }),
 		]);
+		const spans = telemetryContext.getSpans();
+		const request = spans.find((span) => span.name === "pi.ai.request");
+		const attempts = spans.filter((span) => span.name === "pi.ai.provider_attempt");
+		const sleeps = spans.filter((span) => span.name === "pi.ai.retry_sleep");
+		expect(attempts.map((span) => span.parentId)).toEqual([request?.id, request?.id, request?.id]);
+		expect(attempts.map((span) => span.attributes["pi.ai.provider_outcome"])).toEqual([
+			"failed",
+			"failed",
+			"completed",
+		]);
+		expect(sleeps.map((span) => span.parentId)).toEqual([request?.id, request?.id]);
 	});
 
 	it("fails immediately when a provider-requested retry delay exceeds the limit", async () => {

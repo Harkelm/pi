@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai/compat";
+import { InMemoryTelemetryContext, type TelemetryContext } from "@earendil-works/pi-telemetry";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -72,6 +73,7 @@ describe("AgentSession retry", () => {
 		failCount?: number;
 		maxRetries?: number;
 		delayAssistantMessageEndMs?: number;
+		telemetryContext?: TelemetryContext;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
@@ -117,6 +119,7 @@ describe("AgentSession retry", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			telemetryContext: options?.telemetryContext,
 		});
 
 		if (delayAssistantMessageEndMs > 0) {
@@ -133,8 +136,9 @@ describe("AgentSession retry", () => {
 		return { session, getCallCount: () => callCount };
 	}
 
-	it("retries after a transient error and succeeds", async () => {
-		const created = await createSession({ failCount: 1 });
+	it("retries after a transient error and records each actual attempt", async () => {
+		const telemetryContext = new InMemoryTelemetryContext();
+		const created = await createSession({ failCount: 1, telemetryContext });
 		const events: string[] = [];
 		created.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") events.push(`start:${event.attempt}`);
@@ -146,6 +150,19 @@ describe("AgentSession retry", () => {
 		expect(created.getCallCount()).toBe(2);
 		expect(events).toEqual(["start:1", "end:success=true"]);
 		expect(created.session.isRetrying).toBe(false);
+		const spans = telemetryContext.getSpans();
+		const run = spans.find((span) => span.name === "pi.harness.run");
+		const steps = spans.filter((span) => span.name === "pi.harness.step");
+		const requests = spans.filter((span) => span.name === "pi.ai.request");
+		const sleep = spans.find((span) => span.name === "pi.harness.sleep");
+		expect(steps.map((span) => span.parentId)).toEqual([run?.id, run?.id]);
+		expect(steps.map((span) => span.attributes["pi.step.outcome"])).toEqual(["retry", "succeeded"]);
+		expect(requests.map((span) => span.parentId)).toEqual(
+			steps.map((step) => spans.find((span) => span.name === "pi.harness.turn" && span.parentId === step.id)?.id),
+		);
+		expect(sleep?.parentId).toBe(steps[0]?.id);
+		expect(run?.attributes["pi.operation.outcome"]).toBe("completed");
+		expect(JSON.stringify(spans)).not.toContain("overloaded_error");
 	});
 
 	it("exhausts max retries and emits failure", async () => {

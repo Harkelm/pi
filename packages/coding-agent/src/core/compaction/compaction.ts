@@ -5,10 +5,11 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { type AgentMessage, type StreamFn, startAiSpan, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { contentText, type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
 import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionContext,
@@ -582,8 +583,9 @@ function createSummarizationOptions(
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
 	sessionId: string | undefined,
+	telemetryContext?: TelemetryContext,
 ): SimpleStreamOptions {
-	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env, sessionId };
+	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env, sessionId, telemetryContext };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -604,6 +606,8 @@ export async function completeSummarization(
 	streamFn?: StreamFn,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	telemetryContext: TelemetryContext | undefined = options.telemetryContext,
+	purpose: "compaction" | "branch_summary" = "compaction",
 ): Promise<AssistantMessage> {
 	// Avoid cache writes for one-off summaries. Reuse caller-supplied routing when available;
 	// callers without a session ID, including branch summaries, receive a fresh routing ID.
@@ -612,10 +616,78 @@ export async function completeSummarization(
 		cacheRetention: "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
-	const produce = async (): Promise<AssistantMessage> =>
-		streamFn
-			? (await streamFn(model, context, requestOptions)).result()
-			: completeSimple(model, context, requestOptions);
+	let attempt = 0;
+	const produceBody = async (
+		requestTelemetryContext?: TelemetryContext,
+		onHttpResponse?: (status: number) => void,
+	): Promise<AssistantMessage> => {
+		const attemptOptions: SimpleStreamOptions = {
+			...requestOptions,
+			telemetryContext: requestTelemetryContext,
+			onResponse: async (response, responseModel) => {
+				onHttpResponse?.(response.status);
+				await requestOptions.onResponse?.(response, responseModel);
+			},
+		};
+		return streamFn
+			? await (await streamFn(model, context, attemptOptions)).result()
+			: await completeSimple(model, context, attemptOptions);
+	};
+	const produce = async (): Promise<AssistantMessage> => {
+		attempt++;
+		if (!telemetryContext) return produceBody();
+		return startAiSpan(
+			telemetryContext,
+			"pi.ai.request",
+			{
+				"pi.ai.operation": "stream",
+				"pi.ai.provider": model.provider,
+				"pi.ai.model": model.id,
+				"pi.ai.api": model.api,
+				"pi.ai.streaming": true,
+				"pi.ai.purpose": purpose,
+				"pi.ai.attempt": attempt,
+			},
+			async (span) => {
+				let httpStatus: number | undefined;
+				const response = await produceBody(span, (status) => {
+					httpStatus = status;
+				});
+				const failed =
+					response.stopReason === "error" ||
+					response.stopReason === "aborted" ||
+					response.stopReason === "pending";
+				span.setAttributes({
+					...(response.responseId ? { "pi.ai.response.id": response.responseId } : {}),
+					"pi.ai.response.model": response.responseModel ?? response.model,
+					"pi.ai.response.stop_reason":
+						response.stopReason === "toolUse"
+							? "tool_use"
+							: response.stopReason === "pending"
+								? "error"
+								: response.stopReason,
+					"pi.ai.usage.input_tokens": response.usage.input,
+					"pi.ai.usage.output_tokens": response.usage.output,
+					"pi.ai.usage.cache_read_tokens": response.usage.cacheRead,
+					"pi.ai.usage.cache_write_tokens": response.usage.cacheWrite,
+					...(response.usage.cacheWrite1h === undefined
+						? {}
+						: { "pi.ai.usage.cache_write_1h_tokens": response.usage.cacheWrite1h }),
+					...(response.usage.reasoning === undefined
+						? {}
+						: { "pi.ai.usage.reasoning_tokens": response.usage.reasoning }),
+					"pi.ai.usage.total_tokens": response.usage.totalTokens,
+					"pi.ai.usage.cost": response.usage.cost.total,
+					...(httpStatus === undefined ? {} : { "pi.ai.http.status_code": httpStatus }),
+					...(failed
+						? { "pi.ai.error.type": response.stopReason === "aborted" ? "aborted" : "provider_error" }
+						: {}),
+				});
+				if (failed) span.setStatus({ status: "error" });
+				return response;
+			},
+		);
+	};
 	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 
@@ -638,6 +710,7 @@ export async function generateSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	telemetryContext?: TelemetryContext,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -655,6 +728,7 @@ export async function generateSummary(
 			retry,
 			callbacks,
 			sessionId,
+			telemetryContext,
 		)
 	).text;
 }
@@ -689,6 +763,7 @@ export async function generateSummaryWithUsage(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	telemetryContext?: TelemetryContext,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -722,6 +797,7 @@ export async function generateSummaryWithUsage(
 		signal,
 		thinkingLevel,
 		sessionId,
+		telemetryContext,
 	);
 
 	const response = await completeSummarization(
@@ -889,6 +965,7 @@ export async function compact(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	telemetryContext?: TelemetryContext,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -924,6 +1001,7 @@ export async function compact(
 				retry,
 				callbacks,
 				sessionId,
+				telemetryContext,
 			);
 			historyText = historyResult.text;
 			historyUsage = historyResult.usage;
@@ -941,6 +1019,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			telemetryContext,
 		);
 		// Merge into single summary
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
@@ -962,6 +1041,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			telemetryContext,
 		);
 		summary = result.text;
 		summaryUsage = result.usage;
@@ -1000,6 +1080,7 @@ async function generateTurnPrefixSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	telemetryContext?: TelemetryContext,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -1012,7 +1093,17 @@ async function generateTurnPrefixSummary(
 	const response = await completeSummarization(
 		model,
 		buildSummarizationContext(promptText),
-		createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel, sessionId),
+		createSummarizationOptions(
+			model,
+			maxTokens,
+			apiKey,
+			headers,
+			env,
+			signal,
+			thinkingLevel,
+			sessionId,
+			telemetryContext,
+		),
 		streamFn,
 		retry,
 		callbacks,

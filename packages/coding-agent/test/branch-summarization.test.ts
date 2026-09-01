@@ -7,6 +7,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
 import { describe, expect, it } from "vitest";
 import { generateBranchSummary } from "../src/core/compaction/index.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
@@ -70,6 +71,40 @@ describe("branch summarization", () => {
 		expect(prompt).toContain("## Remaining Authorized Work");
 		expect(prompt).toContain("## Suggestions (Not Authorized)");
 		expect(prompt).not.toContain("## Next Steps");
+	});
+
+	it("records branch-summary requests under their structural step", async () => {
+		const telemetryContext = new InMemoryTelemetryContext();
+		const streamFn: StreamFn = (_model, _context, options) => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				void options?.telemetryContext?.startSpan({ name: "provider.transport" }, () => {
+					stream.push({ type: "done", reason: "stop", message: response([{ type: "text", text: "summary" }]) });
+				});
+			});
+			return stream;
+		};
+
+		await telemetryContext.startSpan({ name: "pi.harness.navigation" }, async (navigation) => {
+			await navigation.startSpan({ name: "pi.harness.step" }, async (step) => {
+				await generateBranchSummary(entries, {
+					model,
+					signal: new AbortController().signal,
+					streamFn,
+					telemetryContext: step,
+				});
+			});
+		});
+
+		const spans = telemetryContext.getSpans();
+		const navigation = spans.find((span) => span.name === "pi.harness.navigation");
+		const step = spans.find((span) => span.name === "pi.harness.step");
+		const request = spans.find((span) => span.name === "pi.ai.request");
+		const provider = spans.find((span) => span.name === "provider.transport");
+		expect(step?.parentId).toBe(navigation?.id);
+		expect(request?.parentId).toBe(step?.id);
+		expect(request?.attributes["pi.ai.purpose"]).toBe("branch_summary");
+		expect(provider?.parentId).toBe(request?.id);
 	});
 
 	it("rejects tool calls from branch summaries", async () => {

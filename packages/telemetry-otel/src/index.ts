@@ -8,7 +8,15 @@ import type {
 	TelemetryContext,
 	TelemetrySpan,
 } from "@earendil-works/pi-telemetry";
-import { type Context, context as otelContext, SpanStatusCode, type Tracer, trace } from "@opentelemetry/api";
+import {
+	type Context,
+	context as otelContext,
+	propagation,
+	ROOT_CONTEXT,
+	SpanStatusCode,
+	type Tracer,
+	trace,
+} from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
@@ -41,6 +49,26 @@ export interface OpenTelemetryRuntimeOptions {
 	exporter?: SpanExporter;
 	/** Use synchronous export. Intended for deterministic tests only. */
 	simpleProcessor?: boolean;
+	/** W3C parent supplied by a process manager for a child process. */
+	parentTraceContext?: { traceparent: string; tracestate?: string };
+	/** Content-free process relationship evidence copied onto every span. */
+	inheritedAttributes?: SpanAttributes;
+}
+
+export interface W3CTraceContext {
+	traceparent: string;
+	tracestate?: string;
+}
+
+/** Capture the active span as W3C process-propagation fields. */
+export function getActiveW3CTraceContext(): W3CTraceContext | undefined {
+	const carrier: Record<string, string> = {};
+	propagation.inject(otelContext.active(), carrier);
+	if (!carrier.traceparent) return undefined;
+	return {
+		traceparent: carrier.traceparent,
+		...(carrier.tracestate ? { tracestate: carrier.tracestate } : {}),
+	};
 }
 
 export interface OpenTelemetryRuntime {
@@ -244,14 +272,29 @@ export function createOpenTelemetryRuntime(options: OpenTelemetryRuntimeOptions)
 	const provider = new NodeTracerProvider({ resource, spanProcessors: [processor] });
 	provider.register();
 	const tracer = provider.getTracer("@earendil-works/pi-telemetry-otel", options.serviceVersion);
-	const rootContext = new OpenTelemetryContext(tracer, otelContext.active(), {});
+	const processParentContext = options.parentTraceContext
+		? propagation.extract(ROOT_CONTEXT, {
+				traceparent: options.parentTraceContext.traceparent,
+				...(options.parentTraceContext.tracestate ? { tracestate: options.parentTraceContext.tracestate } : {}),
+			})
+		: otelContext.active();
+	const inheritedAttributes = {
+		...copyAttributes(options.inheritedAttributes),
+		"fleet.telemetry.capture": "live",
+		"fleet.telemetry.fidelity": "exact",
+		"fleet.telemetry.source": options.serviceName,
+	};
+	const rootContext = new OpenTelemetryContext(tracer, processParentContext, inheritedAttributes);
 	let shutdownPromise: Promise<void> | undefined;
 
 	return {
 		telemetryContext: rootContext,
 		contextForSession(sessionId: string): TelemetryContext {
 			if (!sessionId) throw new Error("sessionId must not be empty");
-			return new OpenTelemetryContext(tracer, otelContext.active(), { "session.id": sessionId });
+			return new OpenTelemetryContext(tracer, processParentContext, {
+				...inheritedAttributes,
+				"session.id": sessionId,
+			});
 		},
 		async forceFlush(): Promise<void> {
 			if (!shutdownPromise) await provider.forceFlush();

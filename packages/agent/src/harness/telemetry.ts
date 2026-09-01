@@ -77,6 +77,17 @@ export const AI_TELEMETRY_SCHEMA = {
 					required: false,
 					description: "Whether the operation requests or participates in deferred execution",
 				},
+				"pi.ai.purpose": {
+					type: "string",
+					required: false,
+					values: ["assistant", "compaction", "branch_summary"],
+					description: "Runtime purpose for the request",
+				},
+				"pi.ai.attempt": {
+					type: "number",
+					required: false,
+					description: "One-based request attempt within retrying structural work",
+				},
 			},
 			endAttributes: {
 				"pi.ai.response.model": { type: "string", description: "Concrete response model" },
@@ -98,13 +109,26 @@ export const AI_TELEMETRY_SCHEMA = {
 					type: "number",
 					description: "Reported cache-write tokens",
 				},
+				"pi.ai.usage.cache_write_1h_tokens": {
+					type: "number",
+					description: "Reported one-hour cache-write tokens",
+				},
 				"pi.ai.usage.reasoning_tokens": { type: "number", description: "Reported reasoning tokens" },
 				"pi.ai.usage.total_tokens": { type: "number", description: "Reported total tokens" },
 				"pi.ai.usage.cost": { type: "number", description: "Reported total cost" },
-				"pi.ai.stream.chunk_count": { type: "number", description: "Streamed update chunk count" },
-				"pi.ai.stream.time_to_first_chunk_ms": {
+				"pi.ai.stream.chunk_count": { type: "number", description: "Consumed stream event count" },
+				"pi.ai.stream.time_to_first_event_ms": {
 					type: "number",
-					description: "Elapsed milliseconds to first update chunk",
+					description: "Elapsed milliseconds to the first stream event of any kind",
+				},
+				"pi.ai.stream.time_to_first_text_delta_ms": {
+					type: "number",
+					description: "Elapsed milliseconds to the first provider text-delta event; not token timing",
+				},
+				"pi.ai.stream.text_timing_fidelity": {
+					type: "string",
+					values: ["stream_delta_not_token"],
+					description: "Honest timing fidelity for text deltas",
 				},
 				"pi.ai.error.type": {
 					type: "string",
@@ -113,6 +137,39 @@ export const AI_TELEMETRY_SCHEMA = {
 				},
 			},
 			status: { default: "ok", errorWhen: "The operation throws or returns an error result" },
+		},
+		"pi.ai.provider_attempt": {
+			description: "One observable provider transport attempt",
+			parents: { kind: "spans", spans: ["pi.ai.request"] },
+			startAttributes: {
+				"pi.ai.provider_attempt": { type: "number", required: true, description: "One-based attempt number" },
+				"pi.ai.provider_retry": { type: "boolean", required: true, description: "Whether this is a retry" },
+			},
+			endAttributes: {
+				"pi.ai.provider_outcome": {
+					type: "string",
+					values: ["completed", "failed", "aborted"],
+					description: "Attempt outcome",
+				},
+				"pi.ai.http.status_code": { type: "number", description: "Observed failure status" },
+			},
+			status: { default: "ok", errorWhen: "The transport attempt throws" },
+		},
+		"pi.ai.retry_sleep": {
+			description: "One provider retry backoff",
+			parents: { kind: "spans", spans: ["pi.ai.request"] },
+			startAttributes: {
+				"pi.ai.retry.delay_ms": { type: "number", required: true, description: "Requested delay" },
+				"pi.ai.retry.next_attempt": { type: "number", required: true, description: "Next one-based attempt" },
+			},
+			endAttributes: {
+				"pi.ai.retry.outcome": {
+					type: "string",
+					values: ["elapsed", "aborted"],
+					description: "Backoff outcome",
+				},
+			},
+			status: { default: "ok", errorWhen: "The backoff is aborted" },
 		},
 	},
 } as const satisfies TelemetrySchemaDefinition;
@@ -141,7 +198,14 @@ export function startAiSpan<Name extends AiSpanName, const Attributes extends Ai
 	attributes: ExactTelemetryAttributes<AiSpanStartAttributes<Name>, Attributes>,
 	callback: (span: AiTelemetrySpan<Name>) => Result | Promise<Result>,
 ): Promise<Result> {
-	return telemetryContext.startSpan({ name, attributes }, (span) => callback(span as AiTelemetrySpan<Name>));
+	return telemetryContext.startSpan({ name, attributes }, async (span) => {
+		try {
+			return await callback(span as AiTelemetrySpan<Name>);
+		} catch (error) {
+			span.setStatus({ status: "error" });
+			throw error;
+		}
+	});
 }
 
 const HOOK_NAMES = [
@@ -156,38 +220,6 @@ const HOOK_NAMES = [
 	"after_tool",
 	"before_compaction",
 	"before_navigation",
-] as const;
-
-const EVENT_TYPES = [
-	"run_start",
-	"run_resume",
-	"run_suspend",
-	"run_abort",
-	"run_end",
-	"fault",
-	"handler_error",
-	"turn_start",
-	"turn_end",
-	"retry_scheduled",
-	"retry_start",
-	"retry_end",
-	"message_start",
-	"message_update",
-	"message_end",
-	"tool_start",
-	"tool_update",
-	"tool_end",
-	"entry_added",
-	"write_pending",
-	"queue_update",
-	"fact_update",
-	"config_update",
-	"compaction_start",
-	"compaction_end",
-	"navigation_start",
-	"navigation_end",
-	"lane_created",
-	"usage",
 ] as const;
 
 const operationStartAttributes = {
@@ -326,7 +358,7 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 		},
 		"pi.harness.turn": {
 			description: "One assistant response and its tool batch",
-			parents: { kind: "spans", spans: ["pi.harness.run"] },
+			parents: { kind: "spans", spans: ["pi.harness.step"] },
 			startAttributes: {
 				"pi.lane.name": {
 					type: "string",
@@ -351,10 +383,10 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 			status: { default: "ok", errorWhen: "Turn work throws" },
 		},
 		"pi.harness.step": {
-			description: "One durable retry attempt",
+			description: "One runtime retry attempt around assistant or summarization work",
 			parents: {
 				kind: "spans",
-				spans: ["pi.harness.turn", "pi.harness.checkpoint", "pi.harness.compaction", "pi.harness.navigation"],
+				spans: ["pi.harness.run", "pi.harness.compaction", "pi.harness.navigation", "pi.harness.step"],
 			},
 			startAttributes: {
 				"pi.lane.name": {
@@ -397,7 +429,7 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 			status: { default: "ok", errorWhen: "The attempt retries, fails, or throws" },
 		},
 		"pi.harness.tool": {
-			description: "One raw phase-2 tool execution",
+			description: "One tool preparation and execution lifecycle",
 			parents: { kind: "spans", spans: ["pi.harness.turn", "pi.harness.run"] },
 			startAttributes: {
 				"pi.lane.name": {
@@ -431,23 +463,37 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 				},
 				"pi.tool.replay": {
 					type: "string",
-					required: true,
+					required: false,
 					values: ["never", "safe"],
 					description: "Declared replay policy",
 				},
 				"pi.tool.recovery": {
 					type: "boolean",
-					required: true,
+					required: false,
 					description: "Whether this is recovery execution",
 				},
 			},
 			endAttributes: {
 				"pi.tool.is_error": {
 					type: "boolean",
-					description: "Whether raw phase-2 execution returned an error",
+					description: "Whether the final tool result is an error",
+				},
+				"pi.tool.duration_ms": {
+					type: "number",
+					description:
+						"Observed active preparation, execution, and result-finalization duration; excludes scheduler wait",
+				},
+				"pi.tool.result_size_bytes": {
+					type: "number",
+					description: "Exact byte size of model-visible text and decoded image data",
+				},
+				"pi.tool.outcome": {
+					type: "string",
+					values: ["completed", "error", "aborted"],
+					description: "Final tool lifecycle outcome",
 				},
 			},
-			status: { default: "ok", errorWhen: "Raw phase-2 execution returns an error" },
+			status: { default: "ok", errorWhen: "The final tool result is an error or the call is aborted" },
 		},
 		"pi.harness.hook": {
 			description: "One registered hook handler invocation",
@@ -519,8 +565,13 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 					type: "string",
 					required: true,
 					cardinality: "low",
-					values: EVENT_TYPES,
-					description: "Delivered harness event type",
+					description: "Delivered runtime event type",
+				},
+				"pi.event.handler": {
+					type: "string",
+					required: false,
+					cardinality: "high",
+					description: "Content-free extension handler identity",
 				},
 				"pi.lane.name": {
 					type: "string",
@@ -529,7 +580,13 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 					description: "Lane name for lane-scoped events",
 				},
 			},
-			endAttributes: {},
+			endAttributes: {
+				"pi.event.outcome": {
+					type: "string",
+					values: ["completed", "failed"],
+					description: "Handler invocation outcome",
+				},
+			},
 			status: { default: "ok", errorWhen: "The listener throws" },
 		},
 		"pi.session.write": {
@@ -609,7 +666,12 @@ export function startHarnessSpan<
 	attributes: ExactTelemetryAttributes<HarnessSpanStartAttributes<Name>, Attributes>,
 	callback: (span: HarnessTelemetrySpan<Name>) => Result | Promise<Result>,
 ): Promise<Result> {
-	return telemetryContext.startSpan({ name, attributes }, (span: TelemetrySpan) =>
-		callback(span as HarnessTelemetrySpan<Name>),
-	);
+	return telemetryContext.startSpan({ name, attributes }, async (span: TelemetrySpan) => {
+		try {
+			return await callback(span as HarnessTelemetrySpan<Name>);
+		} catch (error) {
+			span.setStatus({ status: "error" });
+			throw error;
+		}
+	});
 }

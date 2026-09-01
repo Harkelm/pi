@@ -6,6 +6,7 @@ import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
@@ -565,6 +566,48 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("records extension handler success and failure without handler data", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async () => {});
+					pi.on("context", async () => {
+						throw new Error("private handler failure");
+					});
+				}
+			`;
+			const extensionPath = path.join(extensionsDir, "telemetry-handler.ts");
+			fs.writeFileSync(extensionPath, extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const telemetryContext = new InMemoryTelemetryContext();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+				() => telemetryContext,
+			);
+
+			await runner.emitContext([]);
+
+			const spans = telemetryContext.getSpans();
+			expect(spans.map((span) => span.attributes)).toEqual([
+				expect.objectContaining({
+					"pi.event.type": "context",
+					"pi.event.handler": "telemetry-handler.ts",
+					"pi.event.outcome": "completed",
+				}),
+				expect.objectContaining({
+					"pi.event.type": "context",
+					"pi.event.handler": "telemetry-handler.ts",
+					"pi.event.outcome": "failed",
+				}),
+			]);
+			expect(spans[1]?.status.status).toBe("error");
+			expect(JSON.stringify(spans)).not.toContain("private handler failure");
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
