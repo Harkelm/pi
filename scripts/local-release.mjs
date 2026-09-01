@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const packages = [
@@ -104,6 +105,19 @@ function run(command, args, options = {}) {
 
 function readPackageJson(directory) {
 	return JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+}
+
+function capture(command, args, cwd) {
+	const result = spawnSync(command, args, { cwd, encoding: "utf8" });
+	if (result.error) throw result.error;
+	if (result.status !== 0) {
+		throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr.trim()}`);
+	}
+	return result.stdout.trim();
+}
+
+function sha256(path) {
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function commandExists(command) {
@@ -240,6 +254,15 @@ for (const pkg of packages) {
 	tarballs.set(pkg.name, tarball);
 }
 
+const artifactManifest = {
+	schemaVersion: 1,
+	kind: "pi-local-release",
+	createdAt: new Date().toISOString(),
+	sourceCommit: capture("git", ["rev-parse", "HEAD"], repoRoot),
+	sourceState: capture("git", ["status", "--porcelain", "--untracked-files=normal"], repoRoot) ? "dirty" : "clean",
+	tarballs: Object.fromEntries([...tarballs.values()].map((tarball) => [basename(tarball), sha256(tarball)])),
+};
+
 let binaryPlatform;
 if (!options.skipInstall) {
 	binaryPlatform = buildBunBinaryRelease(binaryDirectory, outDir);
@@ -267,6 +290,8 @@ if (!options.skipInstall) {
 		createPiShim(bunInstallDirectory);
 	}
 }
+
+writeFileSync(join(outDir, "pi-local-release.json"), `${JSON.stringify(artifactManifest, undefined, "\t")}\n`);
 
 console.log("\nLocal release artifacts created:");
 console.log(`  ${outDir}`);
