@@ -278,7 +278,12 @@ export function createOpenTelemetryRuntime(options: OpenTelemetryRuntimeOptions)
 				...(options.parentTraceContext.tracestate ? { tracestate: options.parentTraceContext.tracestate } : {}),
 			})
 		: otelContext.active();
-	const inheritedAttributes = copyAttributes(options.inheritedAttributes);
+	const inheritedAttributes = {
+		...copyAttributes(options.inheritedAttributes),
+		"fleet.telemetry.capture": "live",
+		"fleet.telemetry.fidelity": "exact",
+		"fleet.telemetry.source": options.serviceName,
+	};
 	const rootContext = new OpenTelemetryContext(tracer, processParentContext, inheritedAttributes);
 	let shutdownPromise: Promise<void> | undefined;
 

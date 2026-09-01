@@ -45,6 +45,9 @@ describe("OpenTelemetry adapter", () => {
 		expect(span?.name).toBe("pi.ai.request");
 		expect(span?.attributes).toMatchObject({
 			"session.id": "session-test",
+			"fleet.telemetry.capture": "live",
+			"fleet.telemetry.fidelity": "exact",
+			"fleet.telemetry.source": "pi",
 			"pi.ai.provider": "provider-test",
 			"gen_ai.operation.name": "chat",
 			"gen_ai.provider.name": "provider-test",
